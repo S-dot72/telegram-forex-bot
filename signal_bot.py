@@ -247,6 +247,15 @@ def ensure_db():
 
 # --- Main ---
 
+async def send_all_signals_now(app):
+    """Envoie tous les signaux immédiatement pour test"""
+    print("🚀 Envoi immédiat de tous les signaux pour test...")
+    daily = generate_daily_schedule_for_today()
+    for item in daily:
+        print(f"📤 Envoi signal pour {item['pair']}...")
+        await send_pre_signal(item['pair'], item['entry_time'], app)
+    print("✅ Tous les signaux ont été envoyés.")
+
 async def main():
     print("🚀 Démarrage du bot...")
     ensure_db()
@@ -278,6 +287,10 @@ async def main():
     
     print("✅ Bot démarré avec succès!")
     print(f"🤖 Bot: @{(await app.bot.get_me()).username}")
+    
+    # 🔥 ENVOYER TOUS LES SIGNAUX IMMÉDIATEMENT POUR TEST 🔥
+    print("\n⚡ MODE TEST : Envoi immédiat de tous les signaux...")
+    await send_all_signals_now(app)
     
     # Garder le bot en vie
     try:

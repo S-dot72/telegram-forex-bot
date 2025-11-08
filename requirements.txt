@@ -7,4 +7,4 @@ requests==2.32.1
 python-dotenv
 SQLAlchemy
 apscheduler
-pandas_ta>=0.3.28b0
+pandas_ta>=0.3.24b0

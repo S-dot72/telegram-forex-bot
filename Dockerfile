@@ -1,6 +1,9 @@
 # Utiliser l'image Python officielle
 FROM python:3.11-slim
 
+# Installer git et build-essential pour compiler certains packages
+RUN apt-get update && apt-get install -y git build-essential && rm -rf /var/lib/apt/lists/*
+
 # Définir le dossier de travail
 WORKDIR /app
 

@@ -4,8 +4,8 @@ FROM python:3.11-slim
 # Définir le dossier de travail
 WORKDIR /app
 
-# Copier tous les fichiers dans le conteneur
-COPY . .
+# Copier uniquement requirements.txt d'abord pour installer les dépendances
+COPY requirements.txt .
 
 # Installer les dépendances système nécessaires
 RUN apt-get update && apt-get install -y \
@@ -23,6 +23,9 @@ RUN apt-get update && apt-get install -y \
 # Installer les packages Python
 RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Copier tout le projet ensuite
+COPY . .
 
 # Définir variable d'environnement pour logs
 ENV PYTHONUNBUFFERED=1

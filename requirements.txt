@@ -7,4 +7,4 @@ requests==2.32.1
 python-dotenv
 SQLAlchemy
 apscheduler
-git+https://github.com/twopirllc/pandas-ta.git@master
+pandas_ta>=0.3.28b0

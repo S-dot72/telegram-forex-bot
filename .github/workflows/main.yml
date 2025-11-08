@@ -1,0 +1,39 @@
+name: Run Backtester and Commit Results
+
+on:
+  workflow_dispatch:  # Permet de lancer manuellement
+  push:
+    paths:
+      - 'data/**'
+      - 'strategies/**'
+      - 'config/**'
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run backtester
+        run: python backtester_optimized.py
+
+      - name: Commit best parameters
+        run: |
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add best_params.json
+          git commit -m "Auto-update: best_params.json"
+          git push
+        continue-on-error: true

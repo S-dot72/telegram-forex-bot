@@ -1,13 +1,6 @@
 # Image de base (Python 3.11 stable)
 FROM python:3.11-slim
 
-# Installer utilitaires nécessaires (git, build tools si besoin)
-# On installe aussi curl and ca-certificates pour éviter erreurs réseau
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-      git build-essential gcc g++ curl ca-certificates libatlas3-base && \
-    rm -rf /var/lib/apt/lists/*
-
 # Upgrade pip
 RUN python -m pip install --upgrade pip
 

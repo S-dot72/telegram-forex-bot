@@ -32,8 +32,8 @@ TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
 # --- Fonctions utilitaires ---
 
 def fetch_ohlc_td(pair, interval, outputsize=300):
-    
-    params = {'symbol': pair, 'interval': interval, 'outputsize': outputsize,
+    symbol = pair.replace('/', '')
+    params = {'symbol': symbol, 'interval': interval, 'outputsize': outputsize,
               'apikey': TWELVEDATA_API_KEY, 'format':'JSON'}
     r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
     r.raise_for_status()
@@ -41,7 +41,17 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
     if 'values' not in j:
         raise RuntimeError(f"TwelveData error: {j}")
     df = pd.DataFrame(j['values'])[::-1].reset_index(drop=True)
-    df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
+    
+    # Convertir seulement les colonnes disponibles
+    required_cols = ['open', 'high', 'low', 'close']
+    for col in required_cols:
+        if col in df.columns:
+            df[col] = df[col].astype(float)
+    
+    # Volume est optionnel pour le forex
+    if 'volume' in df.columns:
+        df['volume'] = df['volume'].astype(float)
+    
     df.index = pd.to_datetime(df['datetime'])
     return df
 
@@ -248,12 +258,19 @@ def ensure_db():
 # --- Main ---
 
 async def send_all_signals_now(app):
-    """Envoie tous les signaux immédiatement pour test"""
+    """Envoie tous les signaux immédiatement pour test, avec délai pour respecter les limites API"""
     print("🚀 Envoi immédiat de tous les signaux pour test...")
     daily = generate_daily_schedule_for_today()
-    for item in daily:
-        print(f"📤 Envoi signal pour {item['pair']}...")
+    
+    for i, item in enumerate(daily, 1):
+        print(f"📤 Envoi signal {i}/{len(daily)} pour {item['pair']}...")
         await send_pre_signal(item['pair'], item['entry_time'], app)
+        
+        # Attendre 8 secondes entre chaque signal pour respecter la limite API (8 req/min)
+        if i < len(daily):
+            print(f"⏳ Attente de 10 secondes pour respecter la limite API...")
+            await asyncio.sleep(10)
+    
     print("✅ Tous les signaux ont été envoyés.")
 
 async def main():

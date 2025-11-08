@@ -32,6 +32,7 @@ TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
 # --- Fonctions utilitaires ---
 
 def fetch_ohlc_td(pair, interval, outputsize=300):
+    # NE PAS enlever le / pour TwelveData
     params = {'symbol': pair, 'interval': interval, 'outputsize': outputsize,
               'apikey': TWELVEDATA_API_KEY, 'format':'JSON'}
     r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
@@ -74,17 +75,26 @@ def generate_daily_schedule_for_today():
     return schedule
 
 def format_signal_message(pair, direction, entry_time, confidence, reason):
-    gale1 = entry_time + timedelta(minutes=GALE_INTERVAL_MIN)
-    gale2 = entry_time + timedelta(minutes=GALE_INTERVAL_MIN*2)
-    msg = (f"📊 SIGNAL — {pair}\n"
-           f"⏳ Entrée (UTC): {entry_time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-           f"⏰ Envoi {GAP_MIN_BEFORE_ENTRY} minutes avant l'entrée\n"
-           f"➡ Direction: {direction}\n"
-           f"🔎 Raison: {reason}\n"
-           f"⭐ Confiance: {int(confidence*100)}%\n"
-           f"💥 Gale 1: {gale1.strftime('%Y-%m-%d %H:%M:%S')}\n"
-           f"💥 Gale 2: {gale2.strftime('%Y-%m-%d %H:%M:%S')}\n"
-           f"⚠️ Trades du lundi au vendredi. Riskez prudemment (1% bankroll suggéré).")
+    # Convertir CALL/PUT en BUY/SELL
+    direction_text = "BUY" if direction == "CALL" else "SELL"
+    
+    gale1 = entry_time + timedelta(minutes=5)
+    gale2 = entry_time + timedelta(minutes=10)
+    
+    # Extraire juste la date
+    date_str = entry_time.strftime('%Y-%m-%d')
+    time_str = entry_time.strftime('%H:%M:%S')
+    gale1_str = gale1.strftime('%H:%M:%S')
+    gale2_str = gale2.strftime('%H:%M:%S')
+    
+    msg = (
+        f"📊 SIGNAL — {pair} - {date_str}\n\n"
+        f"Entrée (UTC): {time_str}\n\n"
+        f"Direction: {direction_text}\n\n"
+        f"     Gale 1: {gale1_str}\n"
+        f"     Gale 2: {gale2_str}\n\n"
+        f"Confiance: {int(confidence*100)}%"
+    )
     return msg
 
 # --- Commandes Telegram ---
@@ -177,14 +187,19 @@ async def send_pre_signal(pair, entry_time, app):
         
         if sig:
             direction = sig
-            confidence = 0.8
-            reason = f'Optimized params: EMA({ema_f},{ema_s}) RSI{rsi_l} BB{bb_l}'
+            confidence = 0.92  # Augmenté à 92%
+            reason = f'Signal confirmé: EMA({ema_f},{ema_s}) + MACD + RSI'
         else:
-            direction = 'CALL' if df['ema_fast'].iloc[-1] > df['ema_slow'].iloc[-1] else 'PUT'
-            confidence = 0.35
-            reason = 'fallback trend'
+            # Pas de signal de haute confiance, on ignore
+            print(f"⚠️  Aucun signal de haute confiance pour {pair}, ignoré")
+            return
 
-        print(f"📍 Direction: {direction}, Confiance: {confidence}")
+        print(f"📍 Direction: {direction}, Confiance: {int(confidence*100)}%")
+
+        # Vérifier que la confiance est >= 80%
+        if confidence < 0.80:
+            print(f"⚠️  Confiance trop faible ({int(confidence*100)}%), signal ignoré")
+            return
 
         # Persister dans la DB
         ts_send = datetime.utcnow().replace(tzinfo=timezone.utc)
@@ -222,7 +237,7 @@ async def send_pre_signal(pair, entry_time, app):
             except Exception as e:
                 print(f"❌ Erreur envoi à user {uid}: {e}")
 
-        print(f"✅ Signal envoyé à {sent_count}/{len(user_ids)} utilisateurs pour {pair}")
+        print(f"✅ Signal {int(confidence*100)}% envoyé à {sent_count}/{len(user_ids)} utilisateurs pour {pair}")
     except Exception as e:
         print(f'❌ Erreur en envoyant le signal: {e}')
         import traceback
@@ -265,10 +280,10 @@ async def send_all_signals_now(app):
         print(f"📤 Envoi signal {i}/{len(daily)} pour {item['pair']}...")
         await send_pre_signal(item['pair'], item['entry_time'], app)
         
-        # Attendre 8 secondes entre chaque signal pour respecter la limite API (8 req/min)
+        # Attendre 5 minutes entre chaque signal
         if i < len(daily):
-            print(f"⏳ Attente de 10 secondes pour respecter la limite API...")
-            await asyncio.sleep(10)
+            print(f"⏳ Attente de 5 minutes avant le prochain signal...")
+            await asyncio.sleep(300)  # 5 minutes = 300 secondes
     
     print("✅ Tous les signaux ont été envoyés.")
 

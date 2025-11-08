@@ -1,3 +1,16 @@
+-- -------------------------
+-- Table: subscribers
+-- -------------------------
+CREATE TABLE IF NOT EXISTS subscribers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL UNIQUE, -- Telegram user ID
+    username TEXT DEFAULT NULL,       -- optionnel
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- -------------------------
+-- Table: signals
+-- -------------------------
 CREATE TABLE IF NOT EXISTS signals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   pair TEXT NOT NULL,

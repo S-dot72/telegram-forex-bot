@@ -15,9 +15,8 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from config import *
 from utils import compute_indicators, rule_signal
 
-# --- Database et scheduler ---
+# --- Database ---
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
-sched = AsyncIOScheduler(timezone='UTC')
 
 # --- Charger les meilleurs paramètres si présents ---
 BEST_PARAMS = {}
@@ -111,6 +110,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 print(f"✅ User {user_id} ajouté aux abonnés")
     except Exception as e:
         print(f"❌ Erreur dans cmd_start: {e}")
+        import traceback
+        traceback.print_exc()
         await update.message.reply_text(f"❌ Erreur: {e}")
 
 async def cmd_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -220,7 +221,7 @@ async def send_pre_signal(pair, entry_time, app):
 
 # --- Scheduler ---
 
-async def schedule_today_signals(app):
+async def schedule_today_signals(app, sched):
     if datetime.utcnow().weekday() > 4:
         print('🏖️  Weekend, aucun signal')
         return
@@ -258,21 +259,22 @@ async def main():
     app.add_handler(CommandHandler('result', cmd_result))
     app.add_handler(CommandHandler('stats', cmd_stats))
 
-    # Démarrer le scheduler
+    # Créer le scheduler APRÈS avoir démarré l'event loop
+    sched = AsyncIOScheduler(timezone='UTC')
     sched.start()
     print("⏰ Scheduler démarré")
     
     # Planifier les signaux d'aujourd'hui
-    await schedule_today_signals(app)
+    await schedule_today_signals(app, sched)
     
     # Ajouter le job quotidien
-    sched.add_job(schedule_today_signals, 'cron', hour=8, minute=55, args=[app])
+    sched.add_job(schedule_today_signals, 'cron', hour=8, minute=55, args=[app, sched])
     print("📆 Job quotidien configuré")
 
     # Démarrer le bot
     await app.initialize()
     await app.start()
-    await app.updater.start_polling()
+    await app.updater.start_polling(drop_pending_updates=True)  # drop_pending_updates=True évite les conflits
     
     print("✅ Bot démarré avec succès!")
     print(f"🤖 Bot: @{(await app.bot.get_me()).username}")

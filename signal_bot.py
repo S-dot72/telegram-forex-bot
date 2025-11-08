@@ -17,7 +17,7 @@ from utils import compute_indicators, rule_signal
 
 # --- Database ---
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
-
+print("Script démarré")
 # --- Charger les meilleurs paramètres si présents ---
 BEST_PARAMS = {}
 if os.path.exists(BEST_PARAMS_FILE):

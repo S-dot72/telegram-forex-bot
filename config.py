@@ -14,6 +14,7 @@ GAP_MIN_BEFORE_ENTRY = int(os.getenv('GAP_MIN_BEFORE_ENTRY','3'))
 GALE_INTERVAL_MIN = int(os.getenv('GALE_INTERVAL_MIN','5'))
 DB_URL = os.getenv('DB_URL','sqlite:///signals_optimized.db')
 WALK_TOTAL_DAYS = int(os.getenv('WALK_TOTAL_DAYS', '20'))   
-
+WALK_DAYS_WINDOW = int(os.getenv('WALK_DAYS_WINDOW', '5'))     # Window size
+WALK_DAYS_TEST = int(os.getenv('WALK_DAYS_TEST', '10'))        # Test period
 # Backtest defaults (can be overridden by backtester output)
 BEST_PARAMS_FILE = os.getenv('BEST_PARAMS_FILE','best_params.json')

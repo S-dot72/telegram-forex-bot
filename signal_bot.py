@@ -329,9 +329,8 @@ async def main():
     print(f"🤖 Bot: @{(await app.bot.get_me()).username}")
     
     # ⚠️ ENVOI IMMÉDIAT DÉSACTIVÉ pour éviter les conflits au démarrage
-    # Pour tester, utilisez la commande /test dans Telegram
-    # print("\n⚡ MODE TEST : Envoi immédiat de tous les signaux...")
-    # await send_all_signals_now(app)
+     print("\n⚡ MODE TEST : Envoi immédiat de tous les signaux...")
+     await send_all_signals_now(app)
     
     # Garder le bot en vie
     try:

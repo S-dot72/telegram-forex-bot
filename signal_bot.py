@@ -118,9 +118,9 @@ def format_signal_message(pair, direction, entry_time, confidence, reason):
     gale2 = entry_time + timedelta(minutes=10)
     
     date_str = entry_time.strftime('%Y-%m-%d')
-    time_str = entry_time.strftime('%H:%M:%S')
-    gale1_str = gale1.strftime('%H:%M:%S')
-    gale2_str = gale2.strftime('%H:%M:%S')
+    time_str = entry_time.strftime('%H:%M')  # Sans les secondes
+    gale1_str = gale1.strftime('%H:%M')      # Sans les secondes
+    gale2_str = gale2.strftime('%H:%M')      # Sans les secondes
     
     msg = (
         f"📊 SIGNAL — {pair} - {date_str}\n\n"

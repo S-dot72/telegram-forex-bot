@@ -328,7 +328,7 @@ async def main():
     print("✅ Bot démarré avec succès!")
     print(f"🤖 Bot: @{(await app.bot.get_me()).username}")
     
-    # ⚠️ ENVOI IMMÉDIAT DÉSACTIVÉ pour éviter les conflits au démarrage
+     # ⚠️ ENVOI IMMÉDIAT DÉSACTIVÉ pour éviter les conflits au démarrage
      print("\n⚡ MODE TEST : Envoi immédiat de tous les signaux...")
      await send_all_signals_now(app)
     

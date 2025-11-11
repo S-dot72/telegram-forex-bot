@@ -290,12 +290,6 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"Win rate: {perf_stats['winrate']:.1f}%\n"
         msg += f"Confiance moyenne: {perf_stats['avg_confidence']:.1%}\n"
     
-    msg += f"\n⏰ **Configuration**\n"
-    msg += f"Premier signal: {START_HOUR_UTC}h00 UTC\n"
-    msg += f"Intervalle: {SIGNAL_INTERVAL_MIN} min\n"
-    msg += f"Délai entrée: {DELAY_BEFORE_ENTRY_MIN} min\n"
-    msg += f"Signaux/jour: {NUM_SIGNALS_PER_DAY}\n"
-    
     await update.message.reply_text(msg)
 
 # --- Envoi de signaux ---

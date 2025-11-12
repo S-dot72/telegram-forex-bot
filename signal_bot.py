@@ -5,6 +5,7 @@ Production bot avec Machine Learning et vérification automatique des résultats
 - ML pour améliorer la confiance des signaux
 - Vérification automatique WIN/LOSE
 - Support multi-utilisateurs
+- CORRECTION FUSEAU HORAIRE: Gère UTC-5 de Railway
 """
 
 import os, json, asyncio
@@ -20,19 +21,19 @@ from utils import compute_indicators, rule_signal
 from ml_predictor import MLSignalPredictor
 from auto_verifier import AutoResultVerifier
 
-# --- Configuration horaires ---
-START_HOUR_UTC = 9  # Début à 9h UTC
+# --- Configuration horaires (TOUJOURS EN UTC) ---
+START_HOUR_UTC = 9  # Début à 9h UTC (= 4h Railway UTC-5)
 SIGNAL_INTERVAL_MIN = 5  # Signal toutes les 5 minutes
 DELAY_BEFORE_ENTRY_MIN = 3  # 3 minutes entre envoi et entrée
 NUM_SIGNALS_PER_DAY = 20  # Nombre de signaux par jour
 
 # --- Database et scheduler ---
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
-sched = AsyncIOScheduler(timezone='UTC')
+sched = AsyncIOScheduler(timezone='UTC')  # IMPORTANT: Scheduler en UTC
 
 # --- ML Predictor et Auto Verifier ---
 ml_predictor = MLSignalPredictor()
-auto_verifier = None  # Initialisé dans main() car besoin de l'engine
+auto_verifier = None
 
 # --- Charger les meilleurs paramètres si présents ---
 BEST_PARAMS = {}
@@ -51,6 +52,10 @@ CACHE_DURATION_SECONDS = 60
 
 # --- Fonctions utilitaires ---
 
+def get_utc_now():
+    """Retourne l'heure actuelle en UTC (indépendant du fuseau système)"""
+    return datetime.now(timezone.utc)
+
 def fetch_ohlc_td(pair, interval, outputsize=300):
     """Récupère les données OHLC depuis TwelveData API"""
     params = {'symbol': pair, 'interval': interval, 'outputsize': outputsize,
@@ -62,13 +67,11 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
         raise RuntimeError(f"TwelveData error: {j}")
     df = pd.DataFrame(j['values'])[::-1].reset_index(drop=True)
     
-    # Convertir seulement les colonnes disponibles
     required_cols = ['open', 'high', 'low', 'close']
     for col in required_cols:
         if col in df.columns:
             df[col] = df[col].astype(float)
     
-    # Volume est optionnel pour le forex
     if 'volume' in df.columns:
         df['volume'] = df['volume'].astype(float)
     
@@ -78,9 +81,8 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
 def get_cached_ohlc(pair, interval, outputsize=300):
     """Récupère les données OHLC depuis le cache ou l'API"""
     cache_key = f"{pair}_{interval}"
-    current_time = datetime.utcnow()
+    current_time = get_utc_now()
     
-    # Vérifier si on a des données en cache valides
     if cache_key in ohlc_cache:
         cached_data, cached_time = ohlc_cache[cache_key]
         age_seconds = (current_time - cached_time).total_seconds()
@@ -89,11 +91,9 @@ def get_cached_ohlc(pair, interval, outputsize=300):
             print(f"💾 Utilisation du cache pour {pair} (âge: {int(age_seconds)}s)")
             return cached_data
     
-    # Sinon, récupérer depuis l'API
     print(f"🌐 Appel API pour {pair}...")
     df = fetch_ohlc_td(pair, interval, outputsize)
     
-    # Mettre en cache
     ohlc_cache[cache_key] = (df, current_time)
     
     return df
@@ -106,15 +106,16 @@ def persist_signal(payload):
 
 def generate_daily_schedule_for_today():
     """
-    Génère le planning des signaux du jour
-    - Premier signal : envoi 9h00, entrée 9h03
+    Génère le planning des signaux du jour EN UTC
+    - Premier signal : envoi 9h00 UTC, entrée 9h03 UTC
     - Signaux toutes les 5 minutes
     - Total : 20 signaux par jour
     """
-    today = datetime.utcnow().date()
+    # IMPORTANT: Utiliser UTC pour les calculs
+    today_utc = get_utc_now().date()
     
-    # Heure du premier envoi : 9h00 UTC
-    first_send_time = datetime.combine(today, dtime(START_HOUR_UTC, 0, 0), tzinfo=timezone.utc)
+    # Heure du premier envoi : 9h00 UTC (peu importe le fuseau système)
+    first_send_time = datetime.combine(today_utc, dtime(START_HOUR_UTC, 0, 0), tzinfo=timezone.utc)
     
     schedule = []
     active_pairs = PAIRS[:2]  # 2 paires pour respecter limite API
@@ -135,14 +136,14 @@ def generate_daily_schedule_for_today():
             'entry_time': entry_time
         })
     
-    # Afficher le résumé
+    # Afficher le résumé AVEC fuseau UTC explicite
     first_signal = schedule[0]
     last_signal = schedule[-1]
     
-    print(f"📅 Planning généré pour {today.strftime('%Y-%m-%d')}:")
+    print(f"📅 Planning généré pour {today_utc.strftime('%Y-%m-%d')} UTC:")
     print(f"   • Nombre de signaux: {NUM_SIGNALS_PER_DAY}")
-    print(f"   • Premier signal: Envoi {first_signal['send_time'].strftime('%H:%M')}, Entrée {first_signal['entry_time'].strftime('%H:%M')}")
-    print(f"   • Dernier signal: Envoi {last_signal['send_time'].strftime('%H:%M')}, Entrée {last_signal['entry_time'].strftime('%H:%M')}")
+    print(f"   • Premier signal: Envoi {first_signal['send_time'].strftime('%H:%M')} UTC, Entrée {first_signal['entry_time'].strftime('%H:%M')} UTC")
+    print(f"   • Dernier signal: Envoi {last_signal['send_time'].strftime('%H:%M')} UTC, Entrée {last_signal['entry_time'].strftime('%H:%M')} UTC")
     print(f"   • Paires actives: {', '.join(active_pairs)}")
     
     return schedule
@@ -199,6 +200,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "Commandes:\n"
                     "/test - Tester un signal maintenant\n"
                     "/stats - Voir les statistiques\n"
+                    "/verify - Vérifier les résultats"
                 )
                 print(f"✅ User {user_id} ajouté aux abonnés")
     except Exception as e:
@@ -220,7 +222,7 @@ async def cmd_result(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         with engine.begin() as conn:
             q = text("UPDATE signals SET result=:r, ts_result=:t WHERE ts_enter=:ts")
-            conn.execute(q, {'r':res, 't':datetime.utcnow().isoformat(), 'ts':ts})
+            conn.execute(q, {'r':res, 't':get_utc_now().isoformat(), 'ts':ts})
         await update.message.reply_text('✅ Résultat mis à jour')
     except Exception as e:
         await update.message.reply_text('❌ Erreur: '+str(e))
@@ -245,23 +247,18 @@ async def cmd_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"{'='*60}")
     
     try:
-        # Message initial
         msg = await update.message.reply_text("🔍 Vérification des signaux en cours...")
         
-        # Ajouter l'utilisateur comme admin pour recevoir les rapports
         auto_verifier.add_admin(chat_id)
         
-        # Configurer le bot si ce n'est pas déjà fait
         if not auto_verifier.bot:
             auto_verifier.set_bot(context.application.bot)
             print("✅ Bot configuré dans le vérificateur")
         
         print(f"📊 Admins configurés: {auto_verifier.admin_chat_ids}")
         
-        # Lancer la vérification
         await auto_verifier.verify_pending_signals()
         
-        # Supprimer le message "en cours"
         try:
             await msg.delete()
         except:
@@ -281,8 +278,7 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Test de génération de signal en cours...")
     
     pair = PAIRS[0]
-    # Entrée dans 3 minutes comme en production
-    entry_time = datetime.utcnow().replace(tzinfo=timezone.utc) + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
+    entry_time = get_utc_now() + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
     
     await send_pre_signal(pair, entry_time, context.application)
     
@@ -303,7 +299,6 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     winrate = (wins/verified*100) if verified > 0 else 0
     
-    # Stats de performance ML
     perf_stats = auto_verifier.get_performance_stats() if auto_verifier else None
     
     msg = f"📊 **Statistiques Globales**\n\n"
@@ -319,13 +314,18 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"Win rate: {perf_stats['winrate']:.1f}%\n"
         msg += f"Confiance moyenne: {perf_stats['avg_confidence']:.1%}\n"
     
+    msg += f"\n⏰ **Configuration**\n"
+    msg += f"Premier signal: {START_HOUR_UTC}h00 UTC\n"
+    msg += f"Intervalle: {SIGNAL_INTERVAL_MIN} min\n"
+    msg += f"Délai entrée: {DELAY_BEFORE_ENTRY_MIN} min\n"
+    
     await update.message.reply_text(msg)
 
 # --- Envoi de signaux ---
 
 async def send_pre_signal(pair, entry_time, app):
     """Génère et envoie un signal"""
-    now = datetime.utcnow()
+    now = get_utc_now()
     print(f"\n{'='*60}")
     print(f"🔄 GÉNÉRATION SIGNAL - {now.strftime('%H:%M:%S')} UTC")
     print(f"   Paire: {pair}")
@@ -347,7 +347,6 @@ async def send_pre_signal(pair, entry_time, app):
         base_signal = rule_signal(df)
         
         if base_signal:
-            # 🤖 VALIDATION ML
             print(f"🤖 Validation ML du signal {base_signal}...")
             ml_signal, ml_confidence = ml_predictor.predict_signal(df, base_signal)
             
@@ -367,7 +366,7 @@ async def send_pre_signal(pair, entry_time, app):
             print(f"⏭️  Pas de signal base pour {pair}")
             return
 
-        ts_send = datetime.utcnow().replace(tzinfo=timezone.utc)
+        ts_send = get_utc_now()
         payload = {
             'pair': pair,
             'direction': direction,
@@ -418,18 +417,19 @@ async def send_pre_signal(pair, entry_time, app):
 
 async def schedule_today_signals(app, sched):
     """Planifie tous les signaux du jour"""
-    if datetime.utcnow().weekday() > 4:
+    # Vérifier si c'est le weekend EN UTC
+    if get_utc_now().weekday() > 4:
         print('🏖️  Weekend - Pas de signaux planifiés')
         return
 
-    # Supprimer les anciens jobs de signaux (garder les jobs récurrents)
+    # Supprimer les anciens jobs de signaux
     for job in sched.get_jobs():
         if job.id and job.id.startswith('signal_'):
             job.remove()
     
     daily = generate_daily_schedule_for_today()
     
-    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    now = get_utc_now()
     scheduled_count = 0
     
     for item in daily:
@@ -451,19 +451,6 @@ async def schedule_today_signals(app, sched):
         next_signal = min([j.next_run_time for j in sched.get_jobs() if j.id and j.id.startswith('signal_')])
         print(f"   Prochain signal: {next_signal.strftime('%H:%M:%S')} UTC\n")
 
-async def send_all_signals_now(app):
-    """Pour test manuel uniquement"""
-    print("🚀 Test signaux immédiat...")
-    daily = generate_daily_schedule_for_today()
-    
-    for i, item in enumerate(daily[:3], 1):  # Tester seulement 3
-        print(f"📤 Test {i}/3 pour {item['pair']}...")
-        await send_pre_signal(item['pair'], item['entry_time'], app)
-        if i < 3:
-            await asyncio.sleep(10)
-    
-    print("✅ Tests terminés")
-
 # --- DB ---
 
 def ensure_db():
@@ -479,9 +466,15 @@ def ensure_db():
 async def main():
     global auto_verifier
     
+    # Afficher l'heure système ET UTC
+    system_time = datetime.now()
+    utc_time = get_utc_now()
+    
     print("\n" + "="*60)
     print("🤖 BOT DE TRADING ML - DÉMARRAGE")
     print("="*60)
+    print(f"🕐 Heure système: {system_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"🌍 Heure UTC: {utc_time.strftime('%Y-%m-%d %H:%M:%S')} UTC")
     print(f"⏰ Configuration:")
     print(f"   • Premier signal: {START_HOUR_UTC}h00 UTC")
     print(f"   • Intervalle: {SIGNAL_INTERVAL_MIN} minutes")
@@ -492,7 +485,6 @@ async def main():
     ensure_db()
     print("✅ Base de données initialisée")
     
-    # Initialiser l'auto-verifier
     auto_verifier = AutoResultVerifier(engine, TWELVEDATA_API_KEY)
     print("✅ Vérificateur automatique initialisé")
 
@@ -506,12 +498,11 @@ async def main():
     app.add_handler(CommandHandler('verify', cmd_verify))
 
     sched.start()
-    print("✅ Scheduler démarré")
+    print("✅ Scheduler démarré (en UTC)")
     
-    # Planifier les signaux d'aujourd'hui
     await schedule_today_signals(app, sched)
     
-    # Job quotidien pour planifier les signaux à 8h55 UTC (avant le premier signal de 9h)
+    # Job quotidien à 8h55 UTC
     sched.add_job(
         schedule_today_signals,
         'cron',
@@ -521,7 +512,7 @@ async def main():
         id='daily_schedule'
     )
     
-    # 🤖 Job de vérification automatique toutes les 15 minutes
+    # Vérification auto toutes les 15 min
     sched.add_job(
         auto_verifier.verify_pending_signals,
         'interval',

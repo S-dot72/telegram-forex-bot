@@ -1,15 +1,16 @@
 """
 Production bot avec Machine Learning et vérification automatique des résultats.
-- 20 signaux par jour à partir de 9h UTC
+- 20 signaux par jour à partir de 9h UTC (14h heure locale si UTC-5)
 - Signal toutes les 5 minutes avec délai de 3 minutes avant entrée
 - ML pour améliorer la confiance des signaux
 - Vérification automatique WIN/LOSE
 - Support multi-utilisateurs
-- CORRECTION FUSEAU HORAIRE: Gère UTC-5 de Railway
+- CORRECTION FUSEAU HORAIRE: Force l'utilisation de UTC partout
 """
 
 import os, json, asyncio
 from datetime import datetime, timedelta, timezone, time as dtime
+import pytz
 import requests
 import pandas as pd
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -21,15 +22,16 @@ from utils import compute_indicators, rule_signal
 from ml_predictor import MLSignalPredictor
 from auto_verifier import AutoResultVerifier
 
-# --- Configuration horaires (TOUJOURS EN UTC) ---
-START_HOUR_UTC = 9  # Début à 9h UTC (= 4h Railway UTC-5)
-SIGNAL_INTERVAL_MIN = 5  # Signal toutes les 5 minutes
-DELAY_BEFORE_ENTRY_MIN = 3  # 3 minutes entre envoi et entrée
-NUM_SIGNALS_PER_DAY = 20  # Nombre de signaux par jour
+# --- Configuration horaires (EN UTC) ---
+START_HOUR_UTC = 9  # 9h UTC = 4h si Railway UTC-5
+SIGNAL_INTERVAL_MIN = 5
+DELAY_BEFORE_ENTRY_MIN = 3
+NUM_SIGNALS_PER_DAY = 20
 
-# --- Database et scheduler ---
+# --- Database et scheduler EN UTC ---
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
-sched = AsyncIOScheduler(timezone='UTC')  # IMPORTANT: Scheduler en UTC
+# CRUCIAL: Utiliser pytz.UTC pour forcer UTC
+sched = AsyncIOScheduler(timezone=pytz.UTC)
 
 # --- ML Predictor et Auto Verifier ---
 ml_predictor = MLSignalPredictor()
@@ -53,8 +55,8 @@ CACHE_DURATION_SECONDS = 60
 # --- Fonctions utilitaires ---
 
 def get_utc_now():
-    """Retourne l'heure actuelle en UTC (indépendant du fuseau système)"""
-    return datetime.now(timezone.utc)
+    """Retourne l'heure actuelle en UTC"""
+    return datetime.now(pytz.UTC)
 
 def fetch_ohlc_td(pair, interval, outputsize=300):
     """Récupère les données OHLC depuis TwelveData API"""
@@ -107,50 +109,61 @@ def persist_signal(payload):
 def generate_daily_schedule_for_today():
     """
     Génère le planning des signaux du jour EN UTC
-    - Premier signal : envoi 9h00 UTC, entrée 9h03 UTC
-    - Signaux toutes les 5 minutes
-    - Total : 20 signaux par jour
     """
-    # IMPORTANT: Utiliser UTC pour les calculs
-    today_utc = get_utc_now().date()
+    # Obtenir la date UTC actuelle
+    now_utc = get_utc_now()
+    today_utc = now_utc.date()
     
-    # Heure du premier envoi : 9h00 UTC (peu importe le fuseau système)
-    first_send_time = datetime.combine(today_utc, dtime(START_HOUR_UTC, 0, 0), tzinfo=timezone.utc)
+    # Créer le datetime pour 9h00 UTC aujourd'hui
+    first_send_time_utc = pytz.UTC.localize(
+        datetime.combine(today_utc, dtime(START_HOUR_UTC, 0, 0))
+    )
+    
+    # Si on est déjà passé 9h UTC aujourd'hui, planifier pour demain
+    if now_utc >= first_send_time_utc + timedelta(hours=2):  # Si déjà bien avancé dans la journée
+        tomorrow_utc = today_utc + timedelta(days=1)
+        first_send_time_utc = pytz.UTC.localize(
+            datetime.combine(tomorrow_utc, dtime(START_HOUR_UTC, 0, 0))
+        )
     
     schedule = []
-    active_pairs = PAIRS[:2]  # 2 paires pour respecter limite API
+    active_pairs = PAIRS[:2]
     
     for i in range(NUM_SIGNALS_PER_DAY):
-        # Temps d'envoi du signal
-        send_time = first_send_time + timedelta(minutes=i * SIGNAL_INTERVAL_MIN)
+        # Temps d'envoi en UTC
+        send_time_utc = first_send_time_utc + timedelta(minutes=i * SIGNAL_INTERVAL_MIN)
         
-        # Temps d'entrée = temps d'envoi + délai de 3 minutes
-        entry_time = send_time + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
+        # Temps d'entrée en UTC
+        entry_time_utc = send_time_utc + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
         
-        # Alterner les paires
         pair = active_pairs[i % len(active_pairs)]
         
         schedule.append({
             'pair': pair,
-            'send_time': send_time,
-            'entry_time': entry_time
+            'send_time': send_time_utc,
+            'entry_time': entry_time_utc
         })
     
-    # Afficher le résumé AVEC fuseau UTC explicite
+    # Afficher le résumé
     first_signal = schedule[0]
     last_signal = schedule[-1]
     
-    print(f"📅 Planning généré pour {today_utc.strftime('%Y-%m-%d')} UTC:")
+    print(f"📅 Planning généré (UTC):")
+    print(f"   • Date: {first_signal['send_time'].strftime('%Y-%m-%d')}")
     print(f"   • Nombre de signaux: {NUM_SIGNALS_PER_DAY}")
-    print(f"   • Premier signal: Envoi {first_signal['send_time'].strftime('%H:%M')} UTC, Entrée {first_signal['entry_time'].strftime('%H:%M')} UTC")
-    print(f"   • Dernier signal: Envoi {last_signal['send_time'].strftime('%H:%M')} UTC, Entrée {last_signal['entry_time'].strftime('%H:%M')} UTC")
-    print(f"   • Paires actives: {', '.join(active_pairs)}")
+    print(f"   • Premier: Envoi {first_signal['send_time'].strftime('%H:%M')} UTC, Entrée {first_signal['entry_time'].strftime('%H:%M')} UTC")
+    print(f"   • Dernier: Envoi {last_signal['send_time'].strftime('%H:%M')} UTC, Entrée {last_signal['entry_time'].strftime('%H:%M')} UTC")
+    print(f"   • Paires: {', '.join(active_pairs)}")
     
     return schedule
 
 def format_signal_message(pair, direction, entry_time, confidence, reason):
-    """Formate le message de signal à envoyer"""
+    """Formate le message de signal - entry_time doit être en UTC"""
     direction_text = "BUY" if direction == "CALL" else "SELL"
+    
+    # S'assurer que entry_time est en UTC
+    if entry_time.tzinfo is None:
+        entry_time = pytz.UTC.localize(entry_time)
     
     gale1 = entry_time + timedelta(minutes=5)
     gale2 = entry_time + timedelta(minutes=10)
@@ -324,8 +337,13 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Envoi de signaux ---
 
 async def send_pre_signal(pair, entry_time, app):
-    """Génère et envoie un signal"""
+    """Génère et envoie un signal - entry_time doit être en UTC"""
     now = get_utc_now()
+    
+    # S'assurer que entry_time est en UTC
+    if entry_time.tzinfo is None:
+        entry_time = pytz.UTC.localize(entry_time)
+    
     print(f"\n{'='*60}")
     print(f"🔄 GÉNÉRATION SIGNAL - {now.strftime('%H:%M:%S')} UTC")
     print(f"   Paire: {pair}")
@@ -417,8 +435,10 @@ async def send_pre_signal(pair, entry_time, app):
 
 async def schedule_today_signals(app, sched):
     """Planifie tous les signaux du jour"""
+    now_utc = get_utc_now()
+    
     # Vérifier si c'est le weekend EN UTC
-    if get_utc_now().weekday() > 4:
+    if now_utc.weekday() > 4:
         print('🏖️  Weekend - Pas de signaux planifiés')
         return
 
@@ -429,14 +449,13 @@ async def schedule_today_signals(app, sched):
     
     daily = generate_daily_schedule_for_today()
     
-    now = get_utc_now()
     scheduled_count = 0
     
     for item in daily:
         send_time = item['send_time']
         
         # Ne planifier que les signaux futurs
-        if send_time > now:
+        if send_time > now_utc:
             sched.add_job(
                 send_pre_signal,
                 'date',
@@ -446,10 +465,13 @@ async def schedule_today_signals(app, sched):
             )
             scheduled_count += 1
     
-    print(f"\n✅ {scheduled_count}/{len(daily)} signaux planifiés pour aujourd'hui")
+    print(f"\n✅ {scheduled_count}/{len(daily)} signaux planifiés")
     if scheduled_count > 0:
-        next_signal = min([j.next_run_time for j in sched.get_jobs() if j.id and j.id.startswith('signal_')])
-        print(f"   Prochain signal: {next_signal.strftime('%H:%M:%S')} UTC\n")
+        jobs = [j for j in sched.get_jobs() if j.id and j.id.startswith('signal_')]
+        if jobs:
+            next_signal = min([j.next_run_time for j in jobs])
+            print(f"   Prochain signal: {next_signal.strftime('%H:%M:%S')} UTC")
+            print(f"   Dans: {(next_signal - now_utc).total_seconds() / 60:.0f} minutes\n")
 
 # --- DB ---
 
@@ -473,7 +495,7 @@ async def main():
     print("\n" + "="*60)
     print("🤖 BOT DE TRADING ML - DÉMARRAGE")
     print("="*60)
-    print(f"🕐 Heure système: {system_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"🕐 Heure système: {system_time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"🌍 Heure UTC: {utc_time.strftime('%Y-%m-%d %H:%M:%S')} UTC")
     print(f"⏰ Configuration:")
     print(f"   • Premier signal: {START_HOUR_UTC}h00 UTC")
@@ -498,7 +520,7 @@ async def main():
     app.add_handler(CommandHandler('verify', cmd_verify))
 
     sched.start()
-    print("✅ Scheduler démarré (en UTC)")
+    print("✅ Scheduler démarré (pytz.UTC)")
     
     await schedule_today_signals(app, sched)
     

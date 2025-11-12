@@ -32,96 +32,157 @@ class AutoResultVerifier:
         Vérifie tous les signaux qui n'ont pas encore de résultat
         et dont toutes les tentatives (signal + gales) sont terminées
         """
-        print("\n" + "="*60)
-        print(f"🔍 VÉRIFICATION AUTOMATIQUE - {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
-        print("="*60)
-        
-        # Récupérer les signaux sans résultat avec valeurs par défaut pour timeframe et max_gales
-        query = text("""
-            SELECT id, pair, direction, ts_enter, confidence,
-                   COALESCE(timeframe, 5) as timeframe,
-                   COALESCE(max_gales, 2) as max_gales
-            FROM signals 
-            WHERE result IS NULL 
-            AND datetime(ts_enter) < datetime('now')
-            ORDER BY ts_enter DESC
-            LIMIT 50
-        """)
-        
-        with self.engine.connect() as conn:
-            pending = conn.execute(query).fetchall()
-        
-        if not pending:
-            print("✅ Aucun signal en attente de vérification")
+        try:
+            print("\n" + "="*60)
+            print(f"🔍 VÉRIFICATION AUTOMATIQUE - {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+            print("="*60)
+            
+            # Récupérer les signaux sans résultat - VERSION COMPATIBLE SANS COLONNES
+            query = text("""
+                SELECT id, pair, direction, ts_enter, confidence
+                FROM signals 
+                WHERE result IS NULL 
+                AND datetime(ts_enter) < datetime('now')
+                ORDER BY ts_enter DESC
+                LIMIT 50
+            """)
+            
+            with self.engine.connect() as conn:
+                result = conn.execute(query).fetchall()
+                # Ajouter les valeurs par défaut manuellement
+                pending = []
+                for row in result:
+                    # Créer un objet avec les attributs nécessaires
+                    class SignalRow:
+                        def __init__(self, row_data):
+                            self.id = row_data[0]
+                            self.pair = row_data[1]
+                            self.direction = row_data[2]
+                            self.ts_enter = row_data[3]
+                            self.confidence = row_data[4]
+                            self.timeframe = 5  # Valeur par défaut
+                            self.max_gales = 2  # Valeur par défaut
+                    
+                    pending.append(SignalRow(row))
+            
+            print(f"📊 Signaux trouvés: {len(pending)}")
+            
+            if not pending:
+                print("✅ Aucun signal en attente de vérification")
+                print("="*60 + "\n")
+                
+                # Envoyer un message informatif aux admins
+                if self.bot and self.admin_chat_ids:
+                    today_stats = self._get_today_stats()
+                    
+                    if today_stats and today_stats['total_signals'] > 0:
+                        msg = "📊 **RAPPORT DE VÉRIFICATION**\n"
+                        msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+                        msg += "✅ Aucun signal à vérifier maintenant\n\n"
+                        msg += f"📅 **Statistiques du jour:**\n"
+                        msg += f"• Total signaux: {today_stats['total_signals']}\n"
+                        msg += f"• ✅ Réussis: {today_stats['wins']}\n"
+                        msg += f"• ❌ Échoués: {today_stats['losses']}\n"
+                        msg += f"• ⏳ En attente: {today_stats['pending']}\n"
+                        
+                        if today_stats['wins'] + today_stats['losses'] > 0:
+                            msg += f"• 📈 Win rate: {today_stats['winrate']:.1f}%\n"
+                        
+                        msg += "\n━━━━━━━━━━━━━━━━━━━━"
+                    else:
+                        msg = "📊 **RAPPORT DE VÉRIFICATION**\n"
+                        msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
+                        msg += "✅ Aucun signal à vérifier\n\n"
+                        msg += "ℹ️ Aucun signal n'a été envoyé aujourd'hui\n"
+                        msg += "\n━━━━━━━━━━━━━━━━━━━━"
+                    
+                    for chat_id in self.admin_chat_ids:
+                        try:
+                            await self.bot.send_message(chat_id=chat_id, text=msg)
+                            print(f"✅ Rapport envoyé à {chat_id}")
+                        except Exception as e:
+                            print(f"⚠️  Erreur envoi à {chat_id}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                return
+            
+            print(f"📊 {len(pending)} signaux à vérifier")
+            print("-"*60)
+            
+            results = []
+            verified_count = 0
+            skipped_count = 0
+            error_count = 0
+            
+            for signal in pending:
+                try:
+                    # Vérifier si toutes les tentatives sont terminées
+                    if not self._is_signal_complete(signal):
+                        skipped_count += 1
+                        continue
+                    
+                    print(f"\n🔎 Signal #{signal.id} - {signal.pair} {signal.direction} M{signal.timeframe}")
+                    result, details = await self._verify_signal_with_gales(signal)
+                    
+                    if result:
+                        self._update_signal_result(signal.id, result, details)
+                        verified_count += 1
+                        results.append({
+                            'signal': signal,
+                            'result': result,
+                            'details': details
+                        })
+                        
+                        # Log détaillé
+                        emoji = "✅" if result == 'WIN' else "❌"
+                        print(f"{emoji} Résultat: {result}")
+                        if details.get('winning_attempt'):
+                            print(f"   Gagné à: {details['winning_attempt']}")
+                        print(f"   Entrée: {details['entry_price']:.5f}")
+                        print(f"   Sortie: {details['exit_price']:.5f}")
+                        print(f"   Diff: {details['pips']:.1f} pips")
+                    else:
+                        error_count += 1
+                        print(f"⚠️  Impossible de vérifier le signal #{signal.id}")
+                    
+                    await asyncio.sleep(2)  # Respecter limite API
+                    
+                except Exception as e:
+                    error_count += 1
+                    print(f"❌ Erreur vérification signal {signal.id}: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            print("\n" + "-"*60)
+            print(f"📈 RÉSUMÉ: {verified_count} vérifiés, {skipped_count} en attente, {error_count} erreurs")
             print("="*60 + "\n")
             
-            # Envoyer un message aux admins même s'il n'y a rien à vérifier
+            # TOUJOURS envoyer un rapport aux admins
             if self.bot and self.admin_chat_ids:
-                msg = "✅ Aucun signal en attente de vérification"
+                print(f"📤 Envoi du rapport à {len(self.admin_chat_ids)} admin(s)")
+                await self._send_verification_report(results, skipped_count, error_count)
+            else:
+                print(f"⚠️  Impossible d'envoyer le rapport:")
+                print(f"   Bot configuré: {self.bot is not None}")
+                print(f"   Nombre d'admins: {len(self.admin_chat_ids)}")
+            
+            # Vérifier si réentraînement nécessaire
+            if verified_count > 0:
+                self._check_ml_retraining()
+        
+        except Exception as e:
+            print(f"❌ ERREUR GLOBALE dans verify_pending_signals: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            # Envoyer message d'erreur aux admins
+            if self.bot and self.admin_chat_ids:
+                error_msg = f"❌ **Erreur lors de la vérification**\n\n{str(e)}"
                 for chat_id in self.admin_chat_ids:
                     try:
-                        await self.bot.send_message(chat_id=chat_id, text=msg)
-                    except Exception as e:
-                        print(f"⚠️  Erreur envoi à {chat_id}: {e}")
-            return
-        
-        print(f"📊 {len(pending)} signaux à vérifier")
-        print("-"*60)
-        
-        results = []
-        verified_count = 0
-        skipped_count = 0
-        
-        for signal in pending:
-            try:
-                # Vérifier si toutes les tentatives sont terminées
-                if not self._is_signal_complete(signal):
-                    skipped_count += 1
-                    continue
-                
-                print(f"\n🔎 Signal #{signal.id} - {signal.pair} {signal.direction} M{signal.timeframe}")
-                result, details = await self._verify_signal_with_gales(signal)
-                
-                if result:
-                    self._update_signal_result(signal.id, result, details)
-                    verified_count += 1
-                    results.append({
-                        'signal': signal,
-                        'result': result,
-                        'details': details
-                    })
-                    
-                    # Log détaillé
-                    emoji = "✅" if result == 'WIN' else "❌"
-                    print(f"{emoji} Résultat: {result}")
-                    if details.get('winning_attempt'):
-                        print(f"   Gagné à: {details['winning_attempt']}")
-                    print(f"   Entrée: {details['entry_price']:.5f}")
-                    print(f"   Sortie: {details['exit_price']:.5f}")
-                    print(f"   Diff: {details['pips']:.1f} pips")
-                
-                await asyncio.sleep(2)  # Respecter limite API
-                
-            except Exception as e:
-                print(f"❌ Erreur vérification signal {signal.id}: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        print("\n" + "-"*60)
-        print(f"📈 RÉSUMÉ: {verified_count} signaux vérifiés, {skipped_count} en attente")
-        print("="*60 + "\n")
-        
-        # TOUJOURS envoyer un rapport aux admins
-        if self.bot and self.admin_chat_ids:
-            await self._send_verification_report(results, skipped_count)
-        else:
-            print(f"⚠️  Impossible d'envoyer le rapport:")
-            print(f"   Bot: {self.bot is not None}")
-            print(f"   Admins: {len(self.admin_chat_ids)}")
-        
-        # Vérifier si réentraînement nécessaire
-        if verified_count > 0:
-            self._check_ml_retraining()
+                        await self.bot.send_message(chat_id=chat_id, text=error_msg)
+                    except:
+                        pass
     
     def _is_signal_complete(self, signal):
         """Vérifie si toutes les tentatives du signal sont terminées"""
@@ -302,73 +363,100 @@ class AutoResultVerifier:
         
         print(f"💾 Résultat sauvegardé: Signal #{signal_id} = {result}")
     
-    async def _send_verification_report(self, results, skipped_count=0):
+    async def _send_verification_report(self, results, skipped_count=0, error_count=0):
         """Envoie un rapport de vérification aux admins"""
-        # Statistiques du jour
-        today_stats = self._get_today_stats()
-        
-        # Rapport des signaux vérifiés maintenant
-        wins = sum(1 for r in results if r['result'] == 'WIN')
-        losses = len(results) - wins
-        
-        report = "📊 **RAPPORT DE VÉRIFICATION**\n"
-        report += "━━━━━━━━━━━━━━━━━━━━\n\n"
-        
-        # Stats du jour
-        if today_stats:
-            report += f"📅 **Statistiques du jour:**\n"
-            report += f"• Signaux envoyés: {today_stats['total_signals']}\n"
-            report += f"• ✅ Réussis: {today_stats['wins']}\n"
-            report += f"• ❌ Échoués: {today_stats['losses']}\n"
-            report += f"• ⏳ En attente: {today_stats['pending']}\n"
-            if today_stats['wins'] + today_stats['losses'] > 0:
-                report += f"• 📈 Win rate: {today_stats['winrate']:.1f}%\n"
-            report += "\n"
-        
-        # Signaux vérifiés maintenant
-        if len(results) > 0:
-            report += f"🔍 **Vérification actuelle:**\n"
-            report += f"• Signaux vérifiés: {len(results)}\n"
-            report += f"• ✅ Gains: {wins}\n"
-            report += f"• ❌ Pertes: {losses}\n"
-            if skipped_count > 0:
-                report += f"• ⏳ Non terminés: {skipped_count}\n"
-            report += "\n"
+        try:
+            print("📝 Génération du rapport...")
             
-            report += "📋 **Détails:**\n"
+            # Statistiques du jour
+            today_stats = self._get_today_stats()
             
-            for r in results[:10]:  # Max 10 derniers
-                emoji = "✅" if r['result'] == 'WIN' else "❌"
-                sig = r['signal']
-                det = r['details']
+            # Rapport des signaux vérifiés maintenant
+            wins = sum(1 for r in results if r['result'] == 'WIN')
+            losses = len(results) - wins
+            
+            report = "📊 **RAPPORT DE VÉRIFICATION**\n"
+            report += "━━━━━━━━━━━━━━━━━━━━\n\n"
+            
+            # Stats du jour TOUJOURS en premier
+            if today_stats and today_stats['total_signals'] > 0:
+                report += f"📅 **Statistiques du jour:**\n"
+                report += f"• Total signaux: {today_stats['total_signals']}\n"
+                report += f"• ✅ Réussis: {today_stats['wins']}\n"
+                report += f"• ❌ Échoués: {today_stats['losses']}\n"
+                report += f"• ⏳ En attente: {today_stats['pending']}\n"
+                if today_stats['wins'] + today_stats['losses'] > 0:
+                    report += f"• 📈 Win rate: {today_stats['winrate']:.1f}%\n"
+                report += "\n"
+            
+            # Signaux vérifiés maintenant
+            if len(results) > 0:
+                report += f"🔍 **Vérification actuelle:**\n"
+                report += f"• Signaux vérifiés: {len(results)}\n"
+                report += f"• ✅ Gains: {wins}\n"
+                report += f"• ❌ Pertes: {losses}\n"
+                if skipped_count > 0:
+                    report += f"• ⏳ Non terminés: {skipped_count}\n"
+                if error_count > 0:
+                    report += f"• ⚠️ Erreurs: {error_count}\n"
+                report += "\n"
                 
-                attempt_info = ""
-                if det.get('winning_attempt'):
-                    attempt_info = f" ({det['winning_attempt']})"
+                report += "📋 **Détails des vérifications:**\n\n"
                 
-                report += f"{emoji} {sig.pair} {sig.direction} M{sig.timeframe}{attempt_info}\n"
-                report += f"   {det['pips']:.1f} pips | Conf: {sig.confidence:.0%}\n"
-        else:
-            report += "ℹ️ Aucun signal vérifié lors de cette session\n"
-            if skipped_count > 0:
-                report += f"⏳ {skipped_count} signaux en attente (temps non écoulé)\n"
-        
-        report += "\n━━━━━━━━━━━━━━━━━━━━"
-        
-        # Envoyer à tous les admins
-        sent_count = 0
-        for chat_id in self.admin_chat_ids:
-            try:
-                await self.bot.send_message(chat_id=chat_id, text=report)
-                sent_count += 1
-                print(f"✅ Rapport envoyé à l'admin {chat_id}")
-            except Exception as e:
-                print(f"⚠️  Erreur envoi rapport à {chat_id}: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        if sent_count == 0:
-            print(f"❌ Aucun rapport envoyé! Admins: {self.admin_chat_ids}")
+                for i, r in enumerate(results[:10], 1):  # Max 10 derniers
+                    emoji = "✅" if r['result'] == 'WIN' else "❌"
+                    sig = r['signal']
+                    det = r['details']
+                    
+                    attempt_info = ""
+                    if det.get('winning_attempt'):
+                        attempt_info = f" • {det['winning_attempt']}"
+                    
+                    report += f"{i}. {emoji} **{sig.pair}** {sig.direction}{attempt_info}\n"
+                    report += f"   📊 {det['pips']:.1f} pips | Confiance: {sig.confidence:.0%}\n"
+                    
+                    if i < len(results[:10]):  # Pas de saut de ligne après le dernier
+                        report += "\n"
+            else:
+                report += "ℹ️ Aucun signal vérifié lors de cette session\n"
+                if skipped_count > 0:
+                    report += f"\n⏳ **{skipped_count} signal(s) en attente**\n"
+                    report += "   (Le temps nécessaire n'est pas encore écoulé)\n"
+                if error_count > 0:
+                    report += f"\n⚠️ {error_count} erreur(s) rencontrée(s)\n"
+            
+            report += "\n━━━━━━━━━━━━━━━━━━━━"
+            
+            print(f"📤 Envoi du rapport à {len(self.admin_chat_ids)} admin(s)...")
+            
+            # Envoyer à tous les admins
+            sent_count = 0
+            failed_count = 0
+            
+            for chat_id in self.admin_chat_ids:
+                try:
+                    print(f"   → Envoi à {chat_id}...")
+                    await self.bot.send_message(
+                        chat_id=chat_id, 
+                        text=report,
+                        parse_mode='Markdown'
+                    )
+                    sent_count += 1
+                    print(f"   ✅ Envoyé à {chat_id}")
+                except Exception as e:
+                    failed_count += 1
+                    print(f"   ❌ Échec pour {chat_id}: {e}")
+                    import traceback
+                    traceback.print_exc()
+            
+            print(f"\n✅ Rapport envoyé à {sent_count}/{len(self.admin_chat_ids)} admin(s)")
+            if failed_count > 0:
+                print(f"⚠️  {failed_count} échec(s)")
+                
+        except Exception as e:
+            print(f"❌ ERREUR dans _send_verification_report: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _get_today_stats(self):
         """Calcule les statistiques des signaux du jour"""

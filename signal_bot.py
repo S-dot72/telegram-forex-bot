@@ -18,7 +18,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from config import *
 from utils import compute_indicators, rule_signal
 from ml_predictor import MLSignalPredictor
-from auto_result_verifier import AutoResultVerifier
+from auto_verifier import AutoResultVerifier
 
 # --- Configuration horaires ---
 START_HOUR_UTC = 9  # Début à 9h UTC

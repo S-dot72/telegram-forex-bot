@@ -1,13 +1,11 @@
 """
-Bot de trading simplifié qui fonctionne
-- Signaux à 9h UTC (peu importe le fuseau du serveur)
-- Vérification automatique après chaque signal
-- Affichage des heures en heure locale (Haïti)
+Bot de trading - Signaux à 9h AM HEURE LOCALE
+- Détection automatique du fuseau horaire
+- Attend la vérification AVANT d'envoyer le signal suivant
 """
 
 import os, json, asyncio
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo  # ✅ Ajout pour fuseau local
 import requests
 import pandas as pd
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -20,18 +18,16 @@ from ml_predictor import MLSignalPredictor
 from auto_verifier import AutoResultVerifier
 
 # Configuration
-START_HOUR_UTC = 9
+START_HOUR_LOCAL = 9  # 9h AM HEURE LOCALE
 SIGNAL_INTERVAL_MIN = 5
 DELAY_BEFORE_ENTRY_MIN = 3
 NUM_SIGNALS_PER_DAY = 20
 
-# ✅ Fuseau horaire local (Haïti)
-USER_TZ = ZoneInfo("America/Port-au-Prince")
-
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
-sched = AsyncIOScheduler()
+sched = AsyncIOScheduler()  # Utilise l'heure locale du système
 ml_predictor = MLSignalPredictor()
 auto_verifier = None
+signal_queue_running = False
 
 BEST_PARAMS = {}
 if os.path.exists(BEST_PARAMS_FILE):
@@ -97,7 +93,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                              {"uid": user_id, "uname": username})
                 await update.message.reply_text(
                     f"✅ Bienvenue !\n\n"
-                    f"📊 {NUM_SIGNALS_PER_DAY} signaux/jour à {START_HOUR_UTC}h UTC\n"
+                    f"📊 {NUM_SIGNALS_PER_DAY} signaux/jour à {START_HOUR_LOCAL}h AM (heure locale)\n"
                     f"⏱️ Signal toutes les {SIGNAL_INTERVAL_MIN} min\n"
                     f"🔍 Vérification après chaque signal\n\n"
                     f"Commandes:\n"
@@ -201,88 +197,123 @@ async def send_pre_signal(pair, entry_time_utc, app):
         gale1 = entry_time_utc + timedelta(minutes=5)
         gale2 = entry_time_utc + timedelta(minutes=10)
         
-        # ✅ Conversion locale (affichage uniquement)
-        entry_local = entry_time_utc.astimezone(USER_TZ)
-        gale1_local = gale1.astimezone(USER_TZ)
-        gale2_local = gale2.astimezone(USER_TZ)
-
         msg = (
             f"📊 SIGNAL — {pair}\n\n"
-            f"Entrée : {entry_local.strftime('%H:%M')} ({USER_TZ.key})\n"
-            f"Direction : {direction_text}\n\n"
-            f"Gale 1 : {gale1_local.strftime('%H:%M')}\n"
-            f"Gale 2 : {gale2_local.strftime('%H:%M')}\n\n"
-            f"Confiance : {int(ml_conf*100)}%"
+            f"Entrée (UTC): {entry_time_utc.strftime('%H:%M')}\n\n"
+            f"Direction: {direction_text}\n\n"
+            f"     Gale 1: {gale1.strftime('%H:%M')}\n"
+            f"     Gale 2: {gale2.strftime('%H:%M')}\n\n"
+            f"Confiance: {int(ml_conf*100)}%"
         )
-
+        
         for uid in user_ids:
             try:
                 await app.bot.send_message(chat_id=uid, text=msg)
             except Exception as e:
                 print(f"❌ Envoi à {uid}: {e}")
         
-        print(f"✅ Signal envoyé ({ml_signal}, {ml_conf:.1%}) | UTC→Local: {entry_time_utc.strftime('%H:%M')}→{entry_local.strftime('%H:%M')}")
+        print(f"✅ Signal envoyé ({ml_signal}, {ml_conf:.1%})")
         
     except Exception as e:
         print(f"❌ Erreur: {e}")
 
+# --- File d'attente des signaux avec vérification ---
+
+async def process_signal_queue(app):
+    """
+    Traite les signaux un par un:
+    1. Envoie signal
+    2. Attend fin du signal (15 min)
+    3. Vérifie résultat
+    4. Signal suivant
+    """
+    global signal_queue_running
+    
+    if signal_queue_running:
+        print("⚠️ File d'attente déjà en cours")
+        return
+    
+    signal_queue_running = True
+    
+    try:
+        now_local = datetime.now()
+        now_utc = get_utc_now()
+        
+        # Générer la liste des signaux à envoyer (heure locale)
+        start_time_local = now_local.replace(hour=START_HOUR_LOCAL, minute=0, second=0, microsecond=0)
+        
+        # Si on est déjà passé l'heure de début, commencer maintenant
+        if now_local > start_time_local:
+            start_time_local = now_local + timedelta(minutes=1)
+        
+        active_pairs = PAIRS[:2]
+        
+        print(f"\n🚀 DÉBUT DE LA FILE")
+        print(f"   Heure locale: {now_local.strftime('%H:%M:%S')}")
+        print(f"   Heure UTC: {now_utc.strftime('%H:%M:%S')}")
+        print(f"   Début prévu: {start_time_local.strftime('%H:%M:%S')} (local)")
+        
+        for i in range(NUM_SIGNALS_PER_DAY):
+            # Calculer les horaires EN LOCAL
+            send_time_local = start_time_local + timedelta(minutes=i * SIGNAL_INTERVAL_MIN)
+            entry_time_local = send_time_local + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
+            
+            # Convertir en UTC pour la base de données
+            entry_time_utc = entry_time_local.astimezone(timezone.utc) if entry_time_local.tzinfo else datetime.fromtimestamp(entry_time_local.timestamp(), tz=timezone.utc)
+            
+            pair = active_pairs[i % len(active_pairs)]
+            
+            # Attendre l'heure d'envoi
+            now = datetime.now()
+            if send_time_local > now:
+                wait_seconds = (send_time_local - now).total_seconds()
+                print(f"\n⏳ Attente de {wait_seconds/60:.1f} min jusqu'à {send_time_local.strftime('%H:%M')} (local)")
+                await asyncio.sleep(wait_seconds)
+            
+            # Envoyer le signal
+            print(f"\n📤 Signal {i+1}/{NUM_SIGNALS_PER_DAY}")
+            await send_pre_signal(pair, entry_time_utc, app)
+            
+            # Attendre la fin du signal + gales (15 min)
+            verification_time = entry_time_local + timedelta(minutes=15)
+            now = datetime.now()
+            wait_for_verification = (verification_time - now).total_seconds()
+            
+            if wait_for_verification > 0:
+                print(f"⏳ Attente de {wait_for_verification/60:.1f} min pour vérification...")
+                await asyncio.sleep(wait_for_verification)
+            
+            # Vérifier le résultat
+            print(f"🔍 Vérification du signal...")
+            await auto_verifier.verify_pending_signals()
+            
+            print(f"✅ Signal {i+1} terminé\n")
+        
+        print(f"\n🏁 FIN DE LA FILE - Tous les signaux traités")
+        
+    except Exception as e:
+        print(f"❌ Erreur dans la file: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        signal_queue_running = False
+
 # --- Scheduler ---
 
-def generate_schedule():
+async def start_daily_signals(app):
+    """Démarre la file de signaux du jour"""
     now_local = datetime.now()
-    now_utc = get_utc_now()
-    offset_hours = (now_local.replace(tzinfo=None) - now_utc.replace(tzinfo=None)).total_seconds() / 3600
-    local_hour = int(START_HOUR_UTC - offset_hours) % 24
     
-    print(f"\n📅 Planning:")
-    print(f"   Offset serveur: UTC{offset_hours:+.0f}")
-    print(f"   9h UTC = {local_hour}h locale")
-    
-    schedule = []
-    active_pairs = PAIRS[:2]
-    
-    for i in range(NUM_SIGNALS_PER_DAY):
-        minutes_offset = i * SIGNAL_INTERVAL_MIN
-        total_minutes = local_hour * 60 + minutes_offset
-        hour = (total_minutes // 60) % 24
-        minute = total_minutes % 60
-        utc_send = START_HOUR_UTC + (i * SIGNAL_INTERVAL_MIN) / 60
-        utc_entry = utc_send + DELAY_BEFORE_ENTRY_MIN / 60
-        pair = active_pairs[i % len(active_pairs)]
-        schedule.append({
-            'pair': pair,
-            'hour': hour,
-            'minute': minute,
-            'entry_utc_hour': int(utc_entry),
-            'entry_utc_minute': int((utc_entry % 1) * 60)
-        })
-    return schedule
-
-async def schedule_daily_signals(app, sched):
-    now_utc = get_utc_now()
-    if now_utc.weekday() > 4:
-        print("🏖️ Weekend")
+    if now_local.weekday() > 4:
+        print("🏖️ Weekend - pas de signaux")
         return
-    for job in sched.get_jobs():
-        if job.id and job.id.startswith("signal_"):
-            job.remove()
-    schedule = generate_schedule()
-    for i, item in enumerate(schedule):
-        today_utc = now_utc.date()
-        entry_time_utc = datetime(
-            today_utc.year, today_utc.month, today_utc.day,
-            item['entry_utc_hour'], item['entry_utc_minute'],
-            tzinfo=timezone.utc
-        )
-        sched.add_job(
-            send_pre_signal,
-            'cron',
-            hour=item['hour'],
-            minute=item['minute'],
-            args=[item['pair'], entry_time_utc, app],
-            id=f"signal_{i}"
-        )
-    print(f"✅ {len(schedule)} signaux planifiés\n")
+    
+    print(f"\n📅 Démarrage de la séquence quotidienne - {now_local.strftime('%H:%M:%S')} (local)")
+    
+    # Lancer la file en arrière-plan
+    asyncio.create_task(process_signal_queue(app))
+
+# --- DB ---
 
 def ensure_db():
     sql = open('db_schema.sql').read()
@@ -291,35 +322,57 @@ def ensure_db():
             if stmt.strip():
                 conn.execute(text(stmt.strip()))
 
+# --- Main ---
+
 async def main():
     global auto_verifier
+    
     now_local = datetime.now()
     now_utc = get_utc_now()
+    
     print("\n" + "="*60)
     print("🤖 BOT DE TRADING")
     print("="*60)
     print(f"🕐 Heure locale: {now_local.strftime('%H:%M:%S')}")
     print(f"🌍 Heure UTC: {now_utc.strftime('%H:%M:%S')}")
+    print(f"⏰ Premier signal: {START_HOUR_LOCAL}h00 AM (heure locale)")
     print("="*60 + "\n")
+    
     ensure_db()
     auto_verifier = AutoResultVerifier(engine, TWELVEDATA_API_KEY)
+    
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('stats', cmd_stats))
     app.add_handler(CommandHandler('verify', cmd_verify))
     app.add_handler(CommandHandler('test', cmd_test))
+
     sched.start()
-    await schedule_daily_signals(app, sched)
+    
+    # Démarrer la file maintenant si on est après 9h, sinon attendre 9h
     now_local = datetime.now()
-    now_utc = get_utc_now()
-    offset_hours = (now_local.replace(tzinfo=None) - now_utc.replace(tzinfo=None)).total_seconds() / 3600
-    schedule_hour = int(8 - offset_hours) % 24
-    sched.add_job(schedule_daily_signals, 'cron', hour=schedule_hour, minute=55, args=[app, sched], id='daily_schedule')
-    sched.add_job(auto_verifier.verify_pending_signals, 'interval', minutes=15, id='auto_verify')
+    if now_local.hour >= START_HOUR_LOCAL and now_local.weekday() <= 4:
+        print("🚀 Démarrage immédiat de la file")
+        asyncio.create_task(process_signal_queue(app))
+    
+    # Job quotidien à 9h AM HEURE LOCALE
+    sched.add_job(
+        start_daily_signals,
+        'cron',
+        hour=START_HOUR_LOCAL,
+        minute=0,
+        args=[app],
+        id='daily_signals'
+    )
+
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
-    print("✅ BOT DÉMARRÉ\n")
+    
+    bot_info = await app.bot.get_me()
+    print(f"✅ BOT DÉMARRÉ: @{bot_info.username}")
+    print(f"📅 Prochain signal: {START_HOUR_LOCAL}h00 AM (heure locale)\n")
+    
     try:
         while True:
             await asyncio.sleep(1)

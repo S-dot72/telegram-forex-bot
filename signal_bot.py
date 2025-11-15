@@ -27,7 +27,7 @@ VERIFICATION_WAIT_MIN = 15  # Attendre 15 min après entrée avant vérification
 NUM_SIGNALS_PER_DAY = 20
 
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
-sched = AsyncIOScheduler(timezone=HAITI_TZ)  # Scheduler en heure d'Haïti
+sched = AsyncIOScheduler(timezone=HAITI_TZ)
 ml_predictor = MLSignalPredictor()
 auto_verifier = None
 signal_queue_running = False
@@ -44,11 +44,9 @@ TWELVE_TS_URL = 'https://api.twelvedata.com/time_series'
 ohlc_cache = {}
 
 def get_haiti_now():
-    """Retourne l'heure actuelle en timezone Haïti"""
     return datetime.now(HAITI_TZ)
 
 def get_utc_now():
-    """Retourne l'heure actuelle en UTC"""
     return datetime.now(timezone.utc)
 
 def fetch_ohlc_td(pair, interval, outputsize=300):
@@ -86,7 +84,28 @@ def persist_signal(payload):
         result = conn.execute(q, payload)
         return result.lastrowid
 
-# --- Commandes Telegram ---
+def ensure_db():
+    """Crée/met à jour la base de données"""
+    try:
+        sql = open('db_schema.sql').read()
+        with engine.begin() as conn:
+            for stmt in sql.split(';'):
+                if stmt.strip():
+                    conn.execute(text(stmt.strip()))
+        
+        # Ajouter la colonne gale_level si elle n'existe pas
+        with engine.begin() as conn:
+            try:
+                conn.execute(text("ALTER TABLE signals ADD COLUMN gale_level INTEGER DEFAULT 0"))
+                print("✅ Colonne gale_level ajoutée")
+            except Exception as e:
+                if "duplicate column" not in str(e).lower():
+                    print(f"ℹ️ gale_level: {e}")
+                    
+    except Exception as e:
+        print(f"⚠️ Erreur DB: {e}")
+
+# === COMMANDES TELEGRAM ===
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -105,11 +124,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"📊 Jusqu'à {NUM_SIGNALS_PER_DAY} signaux/jour\n"
                     f"⏰ Début: {START_HOUR_HAITI}h00 AM (Haïti)\n"
                     f"🔄 Signal → Vérification → Résultat → Nouveau signal\n\n"
-                    f"Commandes:\n"
+                    f"**Commandes principales:**\n"
                     f"/test - Tester un signal\n"
-                    f"/force - Forcer démarrage session\n"
                     f"/stats - Voir les stats\n"
-                    f"/verify - Vérifier tous les signaux\n"
+                    f"/verify - Vérifier tous les signaux\n\n"
+                    f"**Commandes avancées:**\n"
+                    f"/force - Forcer démarrage session\n"
                     f"/debug - Voir derniers signaux\n"
                     f"/check <id> - Vérifier un signal spécifique"
                 )
@@ -122,6 +142,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total = conn.execute(text('SELECT COUNT(*) FROM signals')).scalar()
             wins = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='WIN'")).scalar()
             losses = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='LOSE'")).scalar()
+            pending = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result IS NULL")).scalar()
             subs = conn.execute(text('SELECT COUNT(*) FROM subscribers')).scalar()
         
         verified = wins + losses
@@ -132,6 +153,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"Vérifiés: {verified}\n"
         msg += f"✅ Réussis: {wins}\n"
         msg += f"❌ Échoués: {losses}\n"
+        msg += f"⏳ En attente: {pending}\n"
         msg += f"📈 Win rate: {winrate:.1f}%\n"
         msg += f"👥 Abonnés: {subs}"
         
@@ -150,7 +172,7 @@ async def cmd_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             await auto_verifier.verify_pending_signals()
-            await msg.edit_text("✅ Vérification terminée!")
+            await msg.edit_text("✅ Vérification terminée! Consultez le rapport ci-dessus.")
         except Exception as e:
             print(f"❌ Erreur lors de la vérification: {e}")
             import traceback
@@ -173,65 +195,11 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if signal_id:
             await update.message.reply_text(f"✅ Signal envoyé (ID: {signal_id})")
         else:
-            await update.message.reply_text("❌ Pas de signal valide actuellement. Réessayez dans quelques minutes.")
+            await update.message.reply_text("❌ Pas de signal valide actuellement.")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
-async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Affiche les derniers signaux pour debug"""
-    try:
-        now_utc = get_utc_now()
-        now_haiti = get_haiti_now()
-        
-        with engine.connect() as conn:
-            signals = conn.execute(
-                text("SELECT id, pair, direction, result, gale_level, ts_enter FROM signals ORDER BY id DESC LIMIT 5")
-            ).fetchall()
-        
-        if not signals:
-            await update.message.reply_text("Aucun signal en base")
-            return
-        
-        msg = f"🔍 **Derniers signaux:**\n\n"
-        msg += f"⏰ Maintenant UTC: {now_utc.strftime('%H:%M:%S')}\n"
-        msg += f"⏰ Maintenant Haïti: {now_haiti.strftime('%H:%M:%S')}\n\n"
-        
-        for sig in signals:
-            sid, pair, direction, result, gale, ts_enter = sig
-            result_text = result if result else "⏳ En attente"
-            gale_text = f"(Gale {gale})" if gale else ""
-            
-            # Parser ts_enter
-            try:
-                entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
-            except:
-                entry_time = datetime.fromisoformat(ts_enter)
-                if entry_time.tzinfo is None:
-                    entry_time = entry_time.replace(tzinfo=timezone.utc)
-            
-            # Calculer temps restant
-            end_time = entry_time + timedelta(minutes=15)
-            time_left = (end_time - now_utc).total_seconds() / 60
-            
-            msg += f"**ID:{sid}** - {pair} {direction}\n"
-            msg += f"Résultat: {result_text} {gale_text}\n"
-            msg += f"Entrée: {entry_time.strftime('%H:%M')} UTC\n"
-            
-            if not result:
-                if time_left > 0:
-                    msg += f"⏳ Reste {time_left:.0f} min\n"
-                else:
-                    msg += f"✅ Prêt pour vérification\n"
-            
-            msg += "\n"
-        
-        await update.message.reply_text(msg)
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur: {e}")
-        import traceback
-        traceback.print_exc()
-    """Force le démarrage de la session même si déjà en cours"""
+async def cmd_force(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global signal_queue_running
     
     if signal_queue_running:
@@ -245,10 +213,121 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
-# --- Envoi de signaux ---
+async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        now_utc = get_utc_now()
+        now_haiti = get_haiti_now()
+        
+        with engine.connect() as conn:
+            signals = conn.execute(
+                text("SELECT id, pair, direction, result, gale_level, ts_enter FROM signals ORDER BY id DESC LIMIT 5")
+            ).fetchall()
+        
+        if not signals:
+            await update.message.reply_text("Aucun signal en base")
+            return
+        
+        msg = f"🔍 **Debug - Derniers signaux**\n\n"
+        msg += f"⏰ Maintenant UTC: {now_utc.strftime('%H:%M:%S')}\n"
+        msg += f"⏰ Maintenant Haïti: {now_haiti.strftime('%H:%M:%S')}\n"
+        msg += f"{'─'*30}\n\n"
+        
+        for sig in signals:
+            sid, pair, direction, result, gale, ts_enter = sig
+            result_text = result if result else "⏳ En attente"
+            gale_text = f" (Gale {gale})" if gale else ""
+            
+            try:
+                entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
+            except:
+                entry_time = datetime.fromisoformat(ts_enter)
+                if entry_time.tzinfo is None:
+                    entry_time = entry_time.replace(tzinfo=timezone.utc)
+            
+            end_time = entry_time + timedelta(minutes=15)
+            time_left = (end_time - now_utc).total_seconds() / 60
+            
+            msg += f"**#{sid}** {pair} {direction}\n"
+            msg += f"📊 {result_text}{gale_text}\n"
+            msg += f"🕐 Entrée: {entry_time.strftime('%H:%M')} UTC\n"
+            
+            if not result:
+                if time_left > 0:
+                    msg += f"⏳ Reste {time_left:.0f} min\n"
+                else:
+                    msg += f"✅ Prêt pour /verify\n"
+            
+            msg += "\n"
+        
+        await update.message.reply_text(msg)
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+        import traceback
+        traceback.print_exc()
+
+async def cmd_check_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        if not context.args or not context.args[0].isdigit():
+            await update.message.reply_text(
+                "❌ Usage: /check <signal_id>\n\nExemple: /check 1\n\nUtilisez /debug pour voir les IDs"
+            )
+            return
+        
+        signal_id = int(context.args[0])
+        
+        with engine.connect() as conn:
+            signal = conn.execute(
+                text("SELECT id, pair, direction, ts_enter, result FROM signals WHERE id = :sid"),
+                {"sid": signal_id}
+            ).fetchone()
+        
+        if not signal:
+            await update.message.reply_text(f"❌ Signal #{signal_id} introuvable")
+            return
+        
+        sid, pair, direction, ts_enter, result = signal
+        
+        if result:
+            await update.message.reply_text(f"ℹ️ Signal #{sid} déjà vérifié: {result}")
+            return
+        
+        msg = await update.message.reply_text(f"🔍 Vérification du signal #{sid}...")
+        
+        try:
+            verification_result = await verify_signal_manual(signal_id, context.application)
+            
+            if verification_result:
+                with engine.connect() as conn:
+                    updated = conn.execute(
+                        text("SELECT result, gale_level FROM signals WHERE id = :sid"),
+                        {"sid": signal_id}
+                    ).fetchone()
+                
+                if updated and updated[0]:
+                    result_emoji = "✅" if updated[0] == "WIN" else "❌"
+                    gale_names = ["Signal initial", "Gale 1", "Gale 2"]
+                    gale_text = gale_names[updated[1]] if updated[1] < 3 else f"Gale {updated[1]}"
+                    
+                    await msg.edit_text(
+                        f"{result_emoji} Signal #{sid} vérifié!\n\n"
+                        f"{pair} {direction}\n"
+                        f"Résultat: {updated[0]}\n"
+                        f"Niveau: {gale_text}"
+                    )
+                else:
+                    await msg.edit_text(f"✅ Signal #{sid} vérifié!")
+            else:
+                await msg.edit_text(f"❌ Impossible de vérifier le signal #{sid}")
+        except Exception as e:
+            await msg.edit_text(f"❌ Erreur:\n{str(e)[:100]}")
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+# === ENVOI DE SIGNAUX ===
 
 async def send_pre_signal(pair, entry_time_haiti, app):
-    """Envoie un signal avec horaire en heure d'Haïti"""
     now_haiti = get_haiti_now()
     print(f"\n📤 Tentative signal {pair} - {now_haiti.strftime('%H:%M:%S')} (Haïti)")
     
@@ -267,38 +346,27 @@ async def send_pre_signal(pair, entry_time_haiti, app):
         base_signal = rule_signal(df)
         
         if not base_signal:
-            print("⏭️ Pas de signal de base (conditions techniques non remplies)")
+            print("⏭️ Pas de signal de base")
             return None
-        
-        print(f"📊 Signal de base détecté: {base_signal}")
         
         ml_signal, ml_conf = ml_predictor.predict_signal(df, base_signal)
         if ml_signal is None or ml_conf < 0.70:
-            print(f"❌ Rejeté par ML (confiance: {ml_conf:.1%} < 70%)")
+            print(f"❌ Rejeté par ML ({ml_conf:.1%})")
             return None
         
-        # Convertir en UTC pour la DB
         entry_time_utc = entry_time_haiti.astimezone(timezone.utc)
         
-        # Sauvegarder
         payload = {
-            'pair': pair, 
-            'direction': ml_signal, 
-            'reason': f'ML {ml_conf:.1%}',
-            'ts_enter': entry_time_utc.isoformat(), 
-            'ts_send': get_utc_now().isoformat(),
-            'confidence': ml_conf, 
-            'payload': json.dumps({'pair': pair})
+            'pair': pair, 'direction': ml_signal, 'reason': f'ML {ml_conf:.1%}',
+            'ts_enter': entry_time_utc.isoformat(), 'ts_send': get_utc_now().isoformat(),
+            'confidence': ml_conf, 'payload': json.dumps({'pair': pair})
         }
         signal_id = persist_signal(payload)
         
-        # Récupérer les abonnés
         with engine.connect() as conn:
             user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
         
         direction_text = "BUY" if ml_signal == "CALL" else "SELL"
-        
-        # Calculer les gales en heure d'Haïti
         gale1_haiti = entry_time_haiti + timedelta(minutes=5)
         gale2_haiti = entry_time_haiti + timedelta(minutes=10)
         
@@ -318,22 +386,48 @@ async def send_pre_signal(pair, entry_time_haiti, app):
                 print(f"❌ Envoi à {uid}: {e}")
         
         print(f"✅ Signal envoyé ({ml_signal}, {ml_conf:.1%})")
-        print(f"   Entrée: {entry_time_haiti.strftime('%H:%M')} (Haïti)")
-        
         return signal_id
         
     except Exception as e:
         print(f"❌ Erreur signal: {e}")
-        import traceback
-        traceback.print_exc()
         return None
 
-async def verify_signal_manual(signal_id, app):
-    """Vérification manuelle simplifiée d'un signal"""
+async def send_verification_result(signal_id, app):
     try:
-        print(f"🔍 Vérification manuelle signal ID:{signal_id}")
+        with engine.connect() as conn:
+            signal = conn.execute(
+                text("SELECT pair, direction, result, gale_level FROM signals WHERE id = :sid"),
+                {"sid": signal_id}
+            ).fetchone()
+            
+            if not signal or not signal[2]:
+                return
+            
+            pair, direction, result, gale_level = signal
+            user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
         
-        # Récupérer le signal
+        if result == "WIN":
+            emoji, status = "✅", "GAGNÉ"
+            gale_names = ["Signal initial", "Gale 1", "Gale 2"]
+            gale_text = gale_names[gale_level] if gale_level < 3 else f"Gale {gale_level}"
+        else:
+            emoji, status, gale_text = "❌", "PERDU", "Après 3 tentatives"
+        
+        msg = f"{emoji} {status}\n{pair} - {direction}\n{gale_text}"
+        
+        for uid in user_ids:
+            try:
+                await app.bot.send_message(chat_id=uid, text=msg)
+            except:
+                pass
+        
+        print(f"📤 Résultat envoyé: {status}")
+        
+    except Exception as e:
+        print(f"❌ Erreur envoi résultat: {e}")
+
+async def verify_signal_manual(signal_id, app):
+    try:
         with engine.connect() as conn:
             signal = conn.execute(
                 text("SELECT pair, direction, ts_enter FROM signals WHERE id = :sid"),
@@ -341,33 +435,29 @@ async def verify_signal_manual(signal_id, app):
             ).fetchone()
         
         if not signal:
-            print(f"❌ Signal {signal_id} non trouvé")
             return False
         
         pair, direction, ts_enter_str = signal
-        ts_enter = datetime.fromisoformat(ts_enter_str)
         
-        print(f"📊 Vérification {pair} {direction} (entrée: {ts_enter})")
+        try:
+            ts_enter = datetime.fromisoformat(ts_enter_str.replace('Z', '+00:00'))
+        except:
+            ts_enter = datetime.fromisoformat(ts_enter_str)
+            if ts_enter.tzinfo is None:
+                ts_enter = ts_enter.replace(tzinfo=timezone.utc)
         
-        # Récupérer les données OHLC
         df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=100)
         
         if df is None or len(df) == 0:
-            print("❌ Pas de données OHLC")
             return False
         
-        # Trouver le prix d'entrée (à l'heure ts_enter)
         df_filtered = df[df.index >= ts_enter]
         
         if len(df_filtered) == 0:
-            print("⏳ Pas encore de données après l'heure d'entrée")
             return False
         
         entry_price = df_filtered.iloc[0]['close']
-        
-        # Vérifier les 3 bougies suivantes (signal initial + 2 gales)
         max_candles = min(3, len(df_filtered))
-        results = []
         
         for i in range(max_candles):
             if i >= len(df_filtered):
@@ -377,78 +467,32 @@ async def verify_signal_manual(signal_id, app):
             open_price = entry_price if i == 0 else df_filtered.iloc[i]['open']
             close_price = candle['close']
             
-            if direction == 'CALL':
-                win = close_price > open_price
-            else:  # PUT
-                win = close_price < open_price
-            
-            results.append(win)
-            print(f"  Bougie {i+1}: {'WIN' if win else 'LOSE'} (open={open_price:.5f}, close={close_price:.5f})")
+            win = (close_price > open_price) if direction == 'CALL' else (close_price < open_price)
             
             if win:
-                # Gagné !
-                gale_level = i  # 0=signal initial, 1=gale1, 2=gale2
                 with engine.begin() as conn:
                     conn.execute(
                         text("UPDATE signals SET result='WIN', gale_level=:gale WHERE id=:sid"),
-                        {"gale": gale_level, "sid": signal_id}
+                        {"gale": i, "sid": signal_id}
                     )
-                print(f"✅ WIN au niveau {gale_level}")
+                print(f"✅ WIN au niveau {i}")
                 return True
         
-        # Perdu après 3 tentatives
         with engine.begin() as conn:
             conn.execute(
                 text("UPDATE signals SET result='LOSE', gale_level=2 WHERE id=:sid"),
                 {"sid": signal_id}
             )
-        print(f"❌ LOSE après {max_candles} tentatives")
+        print(f"❌ LOSE")
         return True
         
     except Exception as e:
         print(f"❌ Erreur verify_signal_manual: {e}")
-        import traceback
-        traceback.print_exc()
         return False
-    """Envoie le résultat de vérification aux abonnés"""
-    try:
-        with engine.connect() as conn:
-            signal = conn.execute(
-                text("SELECT pair, direction, result FROM signals WHERE id = :sid"),
-                {"sid": signal_id}
-            ).fetchone()
-            
-            if not signal or not signal[2]:  # Pas de résultat
-                return
-            
-            pair, direction, result = signal
-            user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
-        
-        # Message simple et clair
-        if result == "WIN":
-            emoji = "✅"
-            status = "GAGNÉ"
-        else:
-            emoji = "❌"
-            status = "PERDU"
-        
-        msg = f"{emoji} Résultat: {status}\n{pair} - {direction}"
-        
-        for uid in user_ids:
-            try:
-                await app.bot.send_message(chat_id=uid, text=msg)
-            except Exception as e:
-                print(f"❌ Envoi résultat à {uid}: {e}")
-        
-        print(f"📤 Résultat envoyé: {status}")
-        
-    except Exception as e:
-        print(f"❌ Erreur envoi résultat: {e}")
 
-# --- File de signaux séquentielle ---
+# === FILE DE SIGNAUX ===
 
 async def process_signal_queue(app):
-    """Traite les signaux séquentiellement: signal → vérification → résultat → nouveau signal"""
     global signal_queue_running
     
     if signal_queue_running:
@@ -461,14 +505,13 @@ async def process_signal_queue(app):
         now_haiti = get_haiti_now()
         
         print(f"\n{'='*60}")
-        print(f"🚀 DÉBUT DE LA SESSION DE TRADING")
+        print(f"🚀 DÉBUT DE LA SESSION")
         print(f"{'='*60}")
-        print(f"🕐 Heure actuelle (Haïti): {now_haiti.strftime('%H:%M:%S')}")
-        print(f"🌍 Heure actuelle (UTC): {get_utc_now().strftime('%H:%M:%S')}")
-        print(f"📊 Max {NUM_SIGNALS_PER_DAY} signaux aujourd'hui")
+        print(f"🕐 Heure Haïti: {now_haiti.strftime('%H:%M:%S')}")
+        print(f"🌍 Heure UTC: {get_utc_now().strftime('%H:%M:%S')}")
         print(f"{'='*60}\n")
         
-        active_pairs = PAIRS[:2]  # EUR/USD et GBP/USD
+        active_pairs = PAIRS[:2]
         
         for i in range(NUM_SIGNALS_PER_DAY):
             pair = active_pairs[i % len(active_pairs)]
@@ -477,74 +520,41 @@ async def process_signal_queue(app):
             print(f"📍 SIGNAL {i+1}/{NUM_SIGNALS_PER_DAY} - {pair}")
             print(f"{'─'*60}")
             
-            # 1. Envoyer le signal
             now_haiti = get_haiti_now()
             entry_time_haiti = now_haiti + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
             
-            print(f"⏰ Tentative d'envoi du signal à {now_haiti.strftime('%H:%M:%S')}")
-            
-            # Réessayer jusqu'à 3 fois si pas de signal
             signal_id = None
             for attempt in range(3):
                 signal_id = await send_pre_signal(pair, entry_time_haiti, app)
-                if signal_id is not None:
+                if signal_id:
                     break
-                print(f"⚠️ Tentative {attempt + 1}/3 échouée, nouvelle tentative dans 30s...")
                 await asyncio.sleep(30)
             
-            if signal_id is None:
-                print(f"❌ Aucun signal valide après 3 tentatives pour {pair}, passage à la paire suivante")
+            if not signal_id:
+                print(f"❌ Aucun signal valide")
                 continue
             
-            # 2. Attendre le temps d'entrée + temps de vérification
             verification_time_haiti = entry_time_haiti + timedelta(minutes=VERIFICATION_WAIT_MIN)
             now_haiti = get_haiti_now()
             wait_seconds = (verification_time_haiti - now_haiti).total_seconds()
             
             if wait_seconds > 0:
-                wait_minutes = wait_seconds / 60
-                print(f"⏳ Attente de {wait_minutes:.1f} min jusqu'à {verification_time_haiti.strftime('%H:%M')}")
+                print(f"⏳ Attente de {wait_seconds/60:.1f} min")
                 await asyncio.sleep(wait_seconds)
             
-            # 3. Vérifier le signal
-            print(f"🔍 Vérification du signal ID:{signal_id}...")
+            print(f"🔍 Vérification...")
             
-            verification_success = False
             try:
-                # Essayer d'abord avec auto_verifier
                 await auto_verifier.verify_pending_signals()
-                verification_success = True
-                print(f"✅ Vérification auto réussie")
-            except Exception as e:
-                print(f"⚠️ Erreur auto_verifier: {e}")
-                # Essayer la vérification manuelle
+            except:
                 try:
-                    verification_success = await verify_signal_manual(signal_id, app)
-                    print(f"✅ Vérification manuelle réussie")
-                except Exception as e2:
-                    print(f"❌ Erreur vérification manuelle: {e2}")
-                    import traceback
-                    traceback.print_exc()
+                    await verify_signal_manual(signal_id, app)
+                except:
+                    pass
             
-            if not verification_success:
-                # Notifier les utilisateurs de l'erreur
-                with engine.connect() as conn:
-                    user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
-                
-                error_msg = f"⚠️ Impossible de vérifier le signal {pair}\nUtilisez /verify dans 5 minutes"
-                for uid in user_ids:
-                    try:
-                        await app.bot.send_message(chat_id=uid, text=error_msg)
-                    except:
-                        pass
-                continue
-            
-            # 4. Envoyer le résultat
             await send_verification_result(signal_id, app)
             
             print(f"✅ Cycle {i+1} terminé\n")
-            
-            # Petite pause avant le prochain signal
             await asyncio.sleep(30)
         
         print(f"\n{'='*60}")
@@ -552,49 +562,23 @@ async def process_signal_queue(app):
         print(f"{'='*60}\n")
         
     except Exception as e:
-        print(f"❌ Erreur dans la file: {e}")
+        print(f"❌ Erreur: {e}")
         import traceback
         traceback.print_exc()
     finally:
         signal_queue_running = False
 
-# --- Scheduler ---
-
 async def start_daily_signals(app):
-    """Démarre la session quotidienne à 9h AM Haïti"""
     now_haiti = get_haiti_now()
     
-    # Vérifier si c'est un jour de semaine
-    if now_haiti.weekday() > 4:  # Samedi=5, Dimanche=6
-        print(f"🏖️ Weekend - Pas de trading")
+    if now_haiti.weekday() > 4:
+        print("🏖️ Weekend")
         return
     
-    print(f"\n📅 Démarrage session - {now_haiti.strftime('%A %d %B %Y, %H:%M:%S')}")
+    print(f"\n📅 Démarrage - {now_haiti.strftime('%H:%M:%S')}")
     asyncio.create_task(process_signal_queue(app))
 
-def ensure_db():
-    """Crée/met à jour la base de données"""
-    try:
-        sql = open('db_schema.sql').read()
-        with engine.begin() as conn:
-            for stmt in sql.split(';'):
-                if stmt.strip():
-                    conn.execute(text(stmt.strip()))
-        
-        # Ajouter la colonne gale_level si elle n'existe pas
-        with engine.begin() as conn:
-            try:
-                conn.execute(text("ALTER TABLE signals ADD COLUMN gale_level INTEGER DEFAULT 0"))
-                print("✅ Colonne gale_level ajoutée")
-            except Exception as e:
-                # La colonne existe déjà, c'est normal
-                if "duplicate column" not in str(e).lower():
-                    print(f"ℹ️ gale_level: {e}")
-                    
-    except Exception as e:
-        print(f"⚠️ Erreur DB: {e}")
-
-# --- Main ---
+# === MAIN ===
 
 async def main():
     global auto_verifier
@@ -625,13 +609,11 @@ async def main():
 
     sched.start()
     
-    # Démarrer immédiatement si on est après 9h AM et avant 18h
     if (now_haiti.hour >= START_HOUR_HAITI and now_haiti.hour < 18 and 
         now_haiti.weekday() <= 4 and not signal_queue_running):
-        print("🚀 Démarrage immédiat de la session")
+        print("🚀 Démarrage immédiat")
         asyncio.create_task(process_signal_queue(app))
     
-    # Job quotidien à 9h00 AM heure d'Haïti
     sched.add_job(
         start_daily_signals,
         'cron',
@@ -648,7 +630,7 @@ async def main():
     
     bot_info = await app.bot.get_me()
     print(f"✅ BOT ACTIF: @{bot_info.username}")
-    print(f"📍 Prochaine session: Demain {START_HOUR_HAITI}h00 AM (Haïti)\n")
+    print(f"📍 Prochaine session: {START_HOUR_HAITI}h00 AM (Haïti)\n")
     
     try:
         while True:

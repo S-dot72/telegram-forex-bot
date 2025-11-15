@@ -12,16 +12,17 @@ CREATE TABLE IF NOT EXISTS subscribers (
 -- Table: signals
 -- -------------------------
 CREATE TABLE IF NOT EXISTS signals (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  pair TEXT NOT NULL,
-  direction TEXT NOT NULL,
-  reason TEXT,
-  ts_enter TEXT NOT NULL,
-  ts_send TEXT,
-  ts_result TEXT,
-  result TEXT,
-  confidence REAL,
-  payload_json TEXT
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pair TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    reason TEXT,
+    ts_enter TEXT NOT NULL,
+    ts_send TEXT,
+    confidence REAL,
+    payload_json TEXT,
+    result TEXT,
+    gale_level INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS metadata (

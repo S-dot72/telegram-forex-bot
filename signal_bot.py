@@ -93,14 +93,47 @@ def ensure_db():
                 if stmt.strip():
                     conn.execute(text(stmt.strip()))
         
-        # Ajouter la colonne gale_level si elle n'existe pas
+        # FORCER l'ajout des colonnes manquantes
         with engine.begin() as conn:
-            try:
-                conn.execute(text("ALTER TABLE signals ADD COLUMN gale_level INTEGER DEFAULT 0"))
-                print("✅ Colonne gale_level ajoutée")
-            except Exception as e:
-                if "duplicate column" not in str(e).lower():
-                    print(f"ℹ️ gale_level: {e}")
+            # Vérifier quelles colonnes existent
+            result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()
+            existing_cols = {row[1] for row in result}
+            
+            print(f"📋 Colonnes existantes dans signals: {existing_cols}")
+            
+            # Ajouter gale_level si manquante
+            if 'gale_level' not in existing_cols:
+                try:
+                    conn.execute(text("ALTER TABLE signals ADD COLUMN gale_level INTEGER DEFAULT 0"))
+                    print("✅ Colonne gale_level ajoutée")
+                except Exception as e:
+                    print(f"⚠️ gale_level: {e}")
+            
+            # Ajouter timeframe si manquante
+            if 'timeframe' not in existing_cols:
+                try:
+                    conn.execute(text("ALTER TABLE signals ADD COLUMN timeframe INTEGER DEFAULT 5"))
+                    print("✅ Colonne timeframe ajoutée")
+                except Exception as e:
+                    print(f"⚠️ timeframe: {e}")
+            
+            # Ajouter max_gales si manquante
+            if 'max_gales' not in existing_cols:
+                try:
+                    conn.execute(text("ALTER TABLE signals ADD COLUMN max_gales INTEGER DEFAULT 2"))
+                    print("✅ Colonne max_gales ajoutée")
+                except Exception as e:
+                    print(f"⚠️ max_gales: {e}")
+            
+            # Ajouter winning_attempt si manquante
+            if 'winning_attempt' not in existing_cols:
+                try:
+                    conn.execute(text("ALTER TABLE signals ADD COLUMN winning_attempt TEXT"))
+                    print("✅ Colonne winning_attempt ajoutée")
+                except Exception as e:
+                    print(f"⚠️ winning_attempt: {e}")
+            
+            print("✅ Structure de la table signals mise à jour")
                     
     except Exception as e:
         print(f"⚠️ Erreur DB: {e}")

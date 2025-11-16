@@ -1,3 +1,4 @@
+
 # auto_verifier.py - Version finale corrigée
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -144,13 +145,32 @@ class AutoResultVerifier:
     def _is_signal_complete_utc(self, ts_enter):
         """Vérifie si signal complet - CALCUL 100% EN UTC"""
         try:
+            print(f"\n   🔍 DEBUG _is_signal_complete_utc")
+            print(f"   📥 ts_enter brut reçu: '{ts_enter}'")
+            print(f"   📥 Type: {type(ts_enter)}")
+            
             # Parser timestamp (stocké en UTC dans DB)
             try:
                 entry_time_utc = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
-            except:
-                entry_time_utc = datetime.fromisoformat(ts_enter)
+                print(f"   ✅ Parse ISO réussi")
+            except Exception as e1:
+                print(f"   ⚠️  Parse ISO échoué: {e1}")
+                try:
+                    entry_time_utc = datetime.fromisoformat(ts_enter)
+                    print(f"   ✅ Parse ISO sans Z réussi")
+                except Exception as e2:
+                    print(f"   ⚠️  Parse ISO sans Z échoué: {e2}")
+                    # Dernier recours
+                    try:
+                        entry_time_utc = datetime.strptime(ts_enter, '%Y-%m-%d %H:%M:%S')
+                        print(f"   ✅ Parse strptime réussi")
+                    except Exception as e3:
+                        print(f"   ❌ Parse strptime échoué: {e3}")
+                        return False
+                
                 if entry_time_utc.tzinfo is None:
                     entry_time_utc = entry_time_utc.replace(tzinfo=timezone.utc)
+                    print(f"   ⚠️  Ajout timezone UTC")
             
             # Temps total en UTC
             total_time_needed = self.default_timeframe * (self.default_max_gales + 1)  # 15 min
@@ -159,21 +179,28 @@ class AutoResultVerifier:
             now_utc = datetime.now(timezone.utc)
             
             print(f"   📅 Entrée (UTC): {entry_time_utc.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"   📅 Entrée ISO: {entry_time_utc.isoformat()}")
             print(f"   📅 Fin prévue (UTC): {last_attempt_end_utc.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"   📅 Maintenant (UTC): {now_utc.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"   📅 Maintenant ISO: {now_utc.isoformat()}")
             
             is_complete = now_utc >= last_attempt_end_utc
             
+            time_diff = (last_attempt_end_utc - now_utc).total_seconds()
+            
             if not is_complete:
-                time_remaining = (last_attempt_end_utc - now_utc).total_seconds() / 60
-                print(f"   ⏳ PAS COMPLET - Reste {time_remaining:.1f} min (UTC)")
+                time_remaining = time_diff / 60
+                print(f"   ⏳ PAS COMPLET - Reste {time_remaining:.1f} min")
+                print(f"   ⏳ Différence en secondes: {time_diff:.0f}s")
             else:
-                print(f"   ✅ COMPLET - Peut être vérifié (UTC)")
+                time_passed = abs(time_diff) / 60
+                print(f"   ✅ COMPLET - Dépassé de {time_passed:.1f} min")
+                print(f"   ✅ Différence en secondes: {time_diff:.0f}s")
             
             return is_complete
             
         except Exception as e:
-            print(f"❌ Erreur _is_signal_complete_utc: {e}")
+            print(f"❌ ERREUR _is_signal_complete_utc: {e}")
             import traceback
             traceback.print_exc()
             return False

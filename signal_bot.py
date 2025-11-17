@@ -1,11 +1,9 @@
 """
-Bot de trading - Signaux séquentiels après vérification
-
-Démarre à 9h AM heure d'Haïti (UTC-5)
-
-Envoie signal → attend vérification → envoie résultat → nouveau signal
-
-20 signaux max par jour
+Bot de trading - Version corrigée
+- Bloque le week-end
+- Nettoie les signaux invalides
+- Gère la limite API
+- Vérifie la session 9h AM
 """
 
 import os, json, asyncio
@@ -23,10 +21,10 @@ from ml_predictor import MLSignalPredictor
 from auto_verifier import AutoResultVerifier
 
 # Configuration
-HAITI_TZ = ZoneInfo("America/Port-au-Prince")  # UTC-5
-START_HOUR_HAITI = 9  # 9h AM heure d'Haïti
+HAITI_TZ = ZoneInfo("America/Port-au-Prince")
+START_HOUR_HAITI = 9
 DELAY_BEFORE_ENTRY_MIN = 3
-VERIFICATION_WAIT_MIN = 15  # Attendre 15 min après entrée avant vérification
+VERIFICATION_WAIT_MIN = 15
 NUM_SIGNALS_PER_DAY = 20
 
 engine = create_engine(DB_URL, connect_args={'check_same_thread': False})
@@ -52,14 +50,43 @@ def get_haiti_now():
 def get_utc_now():
     return datetime.now(timezone.utc)
 
+def is_forex_open():
+    """Vérifie si le marché Forex est ouvert"""
+    now_utc = get_utc_now()
+    weekday = now_utc.weekday()  # 0=lundi, 6=dimanche
+    hour = now_utc.hour
+    
+    # Samedi : toujours fermé
+    if weekday == 5:
+        return False
+    
+    # Dimanche : ouvert après 22h UTC
+    if weekday == 6 and hour < 22:
+        return False
+    
+    # Vendredi : fermé après 22h UTC
+    if weekday == 4 and hour >= 22:
+        return False
+    
+    return True
+
 def fetch_ohlc_td(pair, interval, outputsize=300):
+    if not is_forex_open():
+        raise RuntimeError("Marché Forex fermé")
+    
     params = {'symbol': pair, 'interval': interval, 'outputsize': outputsize,
     'apikey': TWELVEDATA_API_KEY, 'format':'JSON'}
     r = requests.get(TWELVE_TS_URL, params=params, timeout=10)
     r.raise_for_status()
     j = r.json()
+    
+    # Vérifier limite API
+    if 'code' in j and j['code'] == 429:
+        raise RuntimeError(f"Limite API atteinte: {j.get('message', 'Unknown')}")
+    
     if 'values' not in j:
         raise RuntimeError(f"TwelveData error: {j}")
+    
     df = pd.DataFrame(j['values'])[::-1].reset_index(drop=True)
     for col in ['open','high','low','close']:
         if col in df.columns:
@@ -70,15 +97,24 @@ def fetch_ohlc_td(pair, interval, outputsize=300):
     return df
 
 def get_cached_ohlc(pair, interval, outputsize=300):
+    if not is_forex_open():
+        return None
+    
     cache_key = f"{pair}_{interval}"
     current_time = get_utc_now()
+    
     if cache_key in ohlc_cache:
         cached_data, cached_time = ohlc_cache[cache_key]
         if (current_time - cached_time).total_seconds() < 60:
             return cached_data
-    df = fetch_ohlc_td(pair, interval, outputsize)
-    ohlc_cache[cache_key] = (df, current_time)
-    return df
+    
+    try:
+        df = fetch_ohlc_td(pair, interval, outputsize)
+        ohlc_cache[cache_key] = (df, current_time)
+        return df
+    except RuntimeError as e:
+        print(f"⚠️ Cache OHLC: {e}")
+        return None
 
 def persist_signal(payload):
     q = text("""INSERT INTO signals (pair,direction,reason,ts_enter,ts_send,confidence,payload_json)
@@ -86,6 +122,28 @@ def persist_signal(payload):
     with engine.begin() as conn:
         result = conn.execute(q, payload)
     return result.lastrowid
+
+def cleanup_weekend_signals():
+    """Supprime les signaux créés pendant le week-end"""
+    try:
+        with engine.begin() as conn:
+            # Marquer comme LOSE les signaux du week-end sans résultat
+            result = conn.execute(text("""
+                UPDATE signals 
+                SET result = 'LOSE', 
+                    reason = 'Signal créé pendant week-end (marché fermé)'
+                WHERE result IS NULL 
+                AND (
+                    CAST(strftime('%w', ts_enter) AS INTEGER) = 0 OR  -- Dimanche
+                    CAST(strftime('%w', ts_enter) AS INTEGER) = 6     -- Samedi
+                )
+            """))
+            
+            count = result.rowcount
+            if count > 0:
+                print(f"🧹 {count} signaux du week-end nettoyés")
+    except Exception as e:
+        print(f"⚠️ Erreur cleanup: {e}")
 
 def ensure_db():
     """Crée/met à jour la base de données"""
@@ -96,47 +154,26 @@ def ensure_db():
                 if stmt.strip():
                     conn.execute(text(stmt.strip()))
 
-        # FORCER l'ajout des colonnes manquantes
         with engine.begin() as conn:    
-            # Vérifier quelles colonnes existent    
             result = conn.execute(text("PRAGMA table_info(signals)")).fetchall()    
             existing_cols = {row[1] for row in result}    
                 
-            print(f"📋 Colonnes existantes dans signals: {existing_cols}")    
-                
-            # Ajouter gale_level si manquante    
             if 'gale_level' not in existing_cols:    
-                try:    
-                    conn.execute(text("ALTER TABLE signals ADD COLUMN gale_level INTEGER DEFAULT 0"))    
-                    print("✅ Colonne gale_level ajoutée")    
-                except Exception as e:    
-                    print(f"⚠️ gale_level: {e}")    
+                conn.execute(text("ALTER TABLE signals ADD COLUMN gale_level INTEGER DEFAULT 0"))    
             
-            # Ajouter timeframe si manquante    
             if 'timeframe' not in existing_cols:    
-                try:    
-                    conn.execute(text("ALTER TABLE signals ADD COLUMN timeframe INTEGER DEFAULT 5"))    
-                    print("✅ Colonne timeframe ajoutée")    
-                except Exception as e:    
-                    print(f"⚠️ timeframe: {e}")    
+                conn.execute(text("ALTER TABLE signals ADD COLUMN timeframe INTEGER DEFAULT 5"))    
             
-            # Ajouter max_gales si manquante    
             if 'max_gales' not in existing_cols:    
-                try:    
-                    conn.execute(text("ALTER TABLE signals ADD COLUMN max_gales INTEGER DEFAULT 2"))    
-                    print("✅ Colonne max_gales ajoutée")    
-                except Exception as e:    
-                    print(f"⚠️ max_gales: {e}")    
+                conn.execute(text("ALTER TABLE signals ADD COLUMN max_gales INTEGER DEFAULT 2"))    
             
-            # Ajouter winning_attempt si manquante    
             if 'winning_attempt' not in existing_cols:    
-                try:    
-                    conn.execute(text("ALTER TABLE signals ADD COLUMN winning_attempt TEXT"))    
-                    print("✅ Colonne winning_attempt ajoutée")    
-                except Exception as e:    
-                    print(f"⚠️ winning_attempt: {e}")    
+                conn.execute(text("ALTER TABLE signals ADD COLUMN winning_attempt TEXT"))    
             
-            print("✅ Structure de la table signals mise à jour")
+            print("✅ Base de données prête")
+        
+        # Nettoyer les signaux du week-end
+        cleanup_weekend_signals()
 
     except Exception as e:
         print(f"⚠️ Erreur DB: {e}")
@@ -159,16 +196,12 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ Bienvenue !\n\n"
                     f"📊 Jusqu'à {NUM_SIGNALS_PER_DAY} signaux/jour\n"
                     f"⏰ Début: {START_HOUR_HAITI}h00 AM (Haïti)\n"
-                    f"🔄 Signal → Vérification → Résultat → Nouveau signal\n\n"
-                    f"Commandes principales:\n"
-                    f"/test - Tester un signal\n"
-                    f"/stats - Voir les stats\n"
-                    f"/verify - Vérifier tous les signaux\n\n"
-                    f"Commandes avancées:\n"
-                    f"/force - Forcer démarrage session\n"
-                    f"/debug - Voir derniers signaux\n"
-                    f"/check <id> - Vérifier un signal spécifique\n"
-                    f"/debug_verify - Debug détaillé vérification"
+                    f"🔄 Lundi-Vendredi (marché Forex)\n\n"
+                    f"Commandes:\n"
+                    f"/stats - Statistiques\n"
+                    f"/verify - Vérifier signaux\n"
+                    f"/status - État du bot\n"
+                    f"/clean - Nettoyer week-end"
                 )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
@@ -176,10 +209,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         with engine.connect() as conn:
-            total = conn.execute(text('SELECT COUNT() FROM signals')).scalar()
-            wins = conn.execute(text("SELECT COUNT() FROM signals WHERE result='WIN'")).scalar()
-            losses = conn.execute(text("SELECT COUNT() FROM signals WHERE result='LOSE'")).scalar()
-            pending = conn.execute(text("SELECT COUNT() FROM signals WHERE result IS NULL")).scalar()
+            total = conn.execute(text('SELECT COUNT(*) FROM signals')).scalar()
+            wins = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='WIN'")).scalar()
+            losses = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result='LOSE'")).scalar()
+            pending = conn.execute(text("SELECT COUNT(*) FROM signals WHERE result IS NULL")).scalar()
             subs = conn.execute(text('SELECT COUNT(*) FROM subscribers')).scalar()
 
         verified = wins + losses
@@ -199,8 +232,47 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """État du système"""
+    try:
+        now_haiti = get_haiti_now()
+        now_utc = get_utc_now()
+        forex_open = is_forex_open()
+        
+        msg = f"🤖 **État du Bot**\n\n"
+        msg += f"🇭🇹 Haïti: {now_haiti.strftime('%a %H:%M:%S')}\n"
+        msg += f"🌍 UTC: {now_utc.strftime('%a %H:%M:%S')}\n"
+        msg += f"📈 Forex: {'🟢 OUVERT' if forex_open else '🔴 FERMÉ'}\n"
+        msg += f"🔄 Session: {'✅ Active' if signal_queue_running else '⏸️ Inactive'}\n\n"
+        
+        if not forex_open:
+            if now_utc.weekday() == 6 and now_utc.hour < 22:
+                msg += "⏰ Réouverture: Dimanche 22h UTC\n"
+            elif now_utc.weekday() == 5:
+                msg += "⏰ Réouverture: Dimanche 22h UTC\n"
+            else:
+                msg += "⏰ Réouverture: Lundi 00h UTC\n"
+        
+        await update.message.reply_text(msg)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Nettoie les signaux du week-end"""
+    try:
+        msg = await update.message.reply_text("🧹 Nettoyage en cours...")
+        cleanup_weekend_signals()
+        await msg.edit_text("✅ Signaux du week-end nettoyés!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
 async def cmd_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    
+    if not is_forex_open():
+        await update.message.reply_text("⚠️ Marché Forex fermé. Vérification impossible.")
+        return
+    
     try:
         msg = await update.message.reply_text("🔍 Vérification en cours...")
 
@@ -210,228 +282,20 @@ async def cmd_verify(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:    
             await auto_verifier.verify_pending_signals()    
-            await msg.edit_text("✅ Vérification terminée! Consultez le rapport ci-dessus.")    
+            await msg.edit_text("✅ Vérification terminée!")    
         except Exception as e:    
-            print(f"❌ Erreur lors de la vérification: {e}")    
-            import traceback    
-            traceback.print_exc()    
-            await msg.edit_text(f"⚠️ Erreur de vérification: {str(e)[:100]}")
-
-    except Exception as e:
-        print(f"❌ Erreur cmd_verify: {e}")
-        import traceback
-        traceback.print_exc()
-        await update.message.reply_text(f"❌ Erreur: {e}")
-
-async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        await update.message.reply_text("🔍 Test de signal...")
-        pair = PAIRS[0]
-        entry_time_haiti = get_haiti_now() + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
-        signal_id = await send_pre_signal(pair, entry_time_haiti, context.application)
-
-        if signal_id:
-            await update.message.reply_text(f"✅ Signal envoyé (ID: {signal_id})")
-        else:
-            await update.message.reply_text("❌ Pas de signal valide actuellement.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur: {e}")
-
-async def cmd_force(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global signal_queue_running
-
-    if signal_queue_running:
-        await update.message.reply_text("⚠️ Une session est déjà en cours!")
-        return
-
-    try:
-        await update.message.reply_text("🚀 Démarrage forcé de la session...")
-        asyncio.create_task(process_signal_queue(context.application))
-        await update.message.reply_text("✅ Session démarrée!")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur: {e}")
-
-async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        now_utc = get_utc_now()
-        now_haiti = get_haiti_now()
-
-        with engine.connect() as conn:
-            signals = conn.execute(
-                text("SELECT id, pair, direction, result, gale_level, ts_enter FROM signals ORDER BY id DESC LIMIT 5")
-            ).fetchall()
-
-        if not signals:    
-            await update.message.reply_text("Aucun signal en base")    
-            return    
-            
-        msg = f"🔍 **Debug - Derniers signaux**\n\n"    
-        msg += f"⏰ Maintenant UTC: {now_utc.strftime('%H:%M:%S')}\n"    
-        msg += f"⏰ Maintenant Haïti: {now_haiti.strftime('%H:%M:%S')}\n"    
-        msg += f"{'─'*30}\n\n"    
-            
-        for sig in signals:    
-            sid, pair, direction, result, gale, ts_enter = sig    
-            result_text = result if result else "⏳ En attente"    
-            gale_text = f" (Gale {gale})" if gale else ""    
-                
-            try:    
-                entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))    
-            except:    
-                entry_time = datetime.fromisoformat(ts_enter)    
-                if entry_time.tzinfo is None:    
-                    entry_time = entry_time.replace(tzinfo=timezone.utc)    
-                
-            end_time = entry_time + timedelta(minutes=15)    
-            time_left = (end_time - now_utc).total_seconds() / 60    
-                
-            msg += f"**#{sid}** {pair} {direction}\n"    
-            msg += f"📊 {result_text}{gale_text}\n"    
-            msg += f"🕐 Entrée: {entry_time.strftime('%H:%M')} UTC\n"    
-                
-            if not result:    
-                if time_left > 0:    
-                    msg += f"⏳ Reste {time_left:.0f} min\n"    
-                else:    
-                    msg += f"✅ Prêt pour /verify\n"    
-                
-            msg += "\n"    
-            
-        await update.message.reply_text(msg)
+            await msg.edit_text(f"⚠️ Erreur: {str(e)[:100]}")
 
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
-        import traceback
-        traceback.print_exc()
-
-async def cmd_check_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        if not context.args or not context.args[0].isdigit():
-            await update.message.reply_text(
-                "❌ Usage: /check <signal_id>\n\nExemple: /check 1\n\nUtilisez /debug pour voir les IDs"
-            )
-            return
-
-        signal_id = int(context.args[0])
-
-        with engine.connect() as conn:    
-            signal = conn.execute(    
-                text("SELECT id, pair, direction, ts_enter, result FROM signals WHERE id = :sid"),    
-                {"sid": signal_id}    
-            ).fetchone()    
-            
-        if not signal:    
-            await update.message.reply_text(f"❌ Signal #{signal_id} introuvable")    
-            return    
-            
-        sid, pair, direction, ts_enter, result = signal    
-            
-        if result:    
-            await update.message.reply_text(f"ℹ️ Signal #{sid} déjà vérifié: {result}")    
-            return    
-            
-        msg = await update.message.reply_text(f"🔍 Vérification du signal #{sid}...")    
-            
-        try:    
-            verification_result = await verify_signal_manual(signal_id, context.application)    
-                
-            if verification_result:    
-                with engine.connect() as conn:    
-                    updated = conn.execute(    
-                        text("SELECT result, gale_level FROM signals WHERE id = :sid"),    
-                        {"sid": signal_id}    
-                    ).fetchone()    
-                    
-                if updated and updated[0]:    
-                    result_emoji = "✅" if updated[0] == "WIN" else "❌"    
-                    gale_names = ["Signal initial", "Gale 1", "Gale 2"]    
-                    gale_text = gale_names[updated[1]] if updated[1] < 3 else f"Gale {updated[1]}"    
-                        
-                    await msg.edit_text(    
-                        f"{result_emoji} Signal #{sid} vérifié!\n\n"    
-                        f"{pair} {direction}\n"    
-                        f"Résultat: {updated[0]}\n"    
-                        f"Niveau: {gale_text}"    
-                    )    
-                else:    
-                    await msg.edit_text(f"✅ Signal #{sid} vérifié!")    
-            else:    
-                await msg.edit_text(f"❌ Impossible de vérifier le signal #{sid}")    
-        except Exception as e:    
-            await msg.edit_text(f"❌ Erreur:\n{str(e)[:100]}")
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur: {e}")
-
-# NOUVELLE COMMANDE: Debug détaillé de la vérification
-async def cmd_debug_verification(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Commande de debug détaillée pour la vérification"""
-    try:
-        now_utc = get_utc_now()
-        now_haiti = get_haiti_now()
-        
-        with engine.connect() as conn:
-            # Signaux sans résultat
-            pending = conn.execute(
-                text("""
-                    SELECT id, pair, direction, ts_enter, confidence 
-                    FROM signals 
-                    WHERE result IS NULL 
-                    ORDER BY ts_enter DESC
-                """)
-            ).fetchall()
-            
-            # Derniers signaux vérifiés
-            verified = conn.execute(
-                text("""
-                    SELECT id, pair, direction, result, gale_level, ts_enter 
-                    FROM signals 
-                    WHERE result IS NOT NULL 
-                    ORDER BY id DESC LIMIT 5
-                """)
-            ).fetchall()
-        
-        msg = f"🔍 **DEBUG VÉRIFICATION**\n\n"
-        msg += f"⏰ UTC: {now_utc.strftime('%H:%M:%S')}\n"
-        msg += f"⏰ Haïti: {now_haiti.strftime('%H:%M:%S')}\n"
-        msg += f"📊 Signaux en attente: {len(pending)}\n\n"
-        
-        if pending:
-            msg += "⏳ **EN ATTENTE:**\n"
-            for sig in pending[:5]:  # Limiter à 5
-                sid, pair, direction, ts_enter, conf = sig
-                
-                # Analyser le timing
-                try:
-                    entry_time = datetime.fromisoformat(ts_enter.replace('Z', '+00:00'))
-                    if entry_time.tzinfo is None:
-                        entry_time = entry_time.replace(tzinfo=timezone.utc)
-                    
-                    end_time = entry_time + timedelta(minutes=15)
-                    time_left = (end_time - now_utc).total_seconds() / 60
-                    
-                    status = "✅ PRÊT" if time_left <= 0 else f"⏳ {time_left:.1f} min"
-                    
-                    msg += f"#{sid} {pair} {direction} - {status}\n"
-                except Exception as e:
-                    msg += f"#{sid} {pair} - ❌ Erreur: {e}\n"
-        
-        if verified:
-            msg += "\n✅ **DERNIERS VÉRIFIÉS:**\n"
-            for sig in verified:
-                sid, pair, direction, result, gale, ts_enter = sig
-                emoji = "✅" if result == "WIN" else "❌"
-                gale_text = f" (Gale {gale})" if gale else ""
-                msg += f"#{sid} {pair} {direction} {emoji} {result}{gale_text}\n"
-        
-        await update.message.reply_text(msg)
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Erreur debug: {e}")
 
 # === ENVOI DE SIGNAUX ===
 
 async def send_pre_signal(pair, entry_time_haiti, app):
+    if not is_forex_open():
+        print("🏖️ Marché fermé - Pas de signal")
+        return None
+    
     now_haiti = get_haiti_now()
     print(f"\n📤 Tentative signal {pair} - {now_haiti.strftime('%H:%M:%S')} (Haïti)")
 
@@ -440,7 +304,7 @@ async def send_pre_signal(pair, entry_time_haiti, app):
         df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=400)
 
         if df is None or len(df) < 50:    
-            print("❌ Pas assez de données")    
+            print("❌ Pas de données disponibles")    
             return None    
                 
         df = compute_indicators(df, ema_fast=params.get('ema_fast',8),    
@@ -530,74 +394,14 @@ async def send_verification_result(signal_id, app):
     except Exception as e:
         print(f"❌ Erreur envoi résultat: {e}")
 
-async def verify_signal_manual(signal_id, app):
-    try:
-        with engine.connect() as conn:
-            signal = conn.execute(
-                text("SELECT pair, direction, ts_enter FROM signals WHERE id = :sid"),
-                {"sid": signal_id}
-            ).fetchone()
-
-        if not signal:
-            return False
-
-        pair, direction, ts_enter_str = signal    
-            
-        try:    
-            ts_enter = datetime.fromisoformat(ts_enter_str.replace('Z', '+00:00'))    
-        except:    
-            ts_enter = datetime.fromisoformat(ts_enter_str)    
-            if ts_enter.tzinfo is None:    
-                ts_enter = ts_enter.replace(tzinfo=timezone.utc)    
-            
-        df = get_cached_ohlc(pair, TIMEFRAME_M1, outputsize=100)    
-            
-        if df is None or len(df) == 0:    
-            return False    
-            
-        df_filtered = df[df.index >= ts_enter]    
-            
-        if len(df_filtered) == 0:    
-            return False    
-            
-        entry_price = df_filtered.iloc[0]['close']    
-        max_candles = min(3, len(df_filtered))    
-            
-        for i in range(max_candles):    
-            if i >= len(df_filtered):    
-                break    
-                    
-            candle = df_filtered.iloc[i]    
-            open_price = entry_price if i == 0 else df_filtered.iloc[i]['open']    
-            close_price = candle['close']    
-                
-            win = (close_price > open_price) if direction == 'CALL' else (close_price < open_price)    
-                
-            if win:    
-                with engine.begin() as conn:    
-                    conn.execute(    
-                        text("UPDATE signals SET result='WIN', gale_level=:gale WHERE id=:sid"),    
-                        {"gale": i, "sid": signal_id}    
-                    )    
-                print(f"✅ WIN au niveau {i}")    
-                return True    
-            
-        with engine.begin() as conn:    
-            conn.execute(    
-                text("UPDATE signals SET result='LOSE', gale_level=2 WHERE id=:sid"),    
-                {"sid": signal_id}    
-            )    
-        print(f"❌ LOSE")    
-        return True
-
-    except Exception as e:
-        print(f"❌ Erreur verify_signal_manual: {e}")
-        return False
-
 # === FILE DE SIGNAUX ===
 
 async def process_signal_queue(app):
     global signal_queue_running
+
+    if not is_forex_open():
+        print("🏖️ Marché Forex fermé - Session annulée")
+        return
 
     if signal_queue_running:
         print("⚠️ File déjà en cours")
@@ -618,6 +422,10 @@ async def process_signal_queue(app):
         active_pairs = PAIRS[:2]    
             
         for i in range(NUM_SIGNALS_PER_DAY):    
+            if not is_forex_open():
+                print("🏖️ Marché fermé - Arrêt session")
+                break
+            
             pair = active_pairs[i % len(active_pairs)]    
                 
             print(f"\n{'─'*60}")    
@@ -651,10 +459,7 @@ async def process_signal_queue(app):
             try:    
                 await auto_verifier.verify_pending_signals()    
             except:    
-                try:    
-                    await verify_signal_manual(signal_id, app)    
-                except:    
-                    pass    
+                pass    
                 
             await send_verification_result(signal_id, app)    
                 
@@ -673,13 +478,20 @@ async def process_signal_queue(app):
         signal_queue_running = False
 
 async def start_daily_signals(app):
+    """Démarre la session quotidienne"""
     now_haiti = get_haiti_now()
-
+    
+    # Vérifier que c'est un jour de semaine
     if now_haiti.weekday() > 4:
-        print("🏖️ Weekend")
+        print("🏖️ Week-end - Pas de session")
+        return
+    
+    # Vérifier que le marché est ouvert
+    if not is_forex_open():
+        print("🏖️ Marché fermé - Pas de session")
         return
 
-    print(f"\n📅 Démarrage - {now_haiti.strftime('%H:%M:%S')}")
+    print(f"\n📅 Démarrage session - {now_haiti.strftime('%H:%M:%S')}")
     asyncio.create_task(process_signal_queue(app))
 
 # === MAIN ===
@@ -695,8 +507,9 @@ async def main():
     print("="*60)
     print(f"🇭🇹 Heure Haïti: {now_haiti.strftime('%H:%M:%S %Z')}")
     print(f"🌍 Heure UTC: {now_utc.strftime('%H:%M:%S %Z')}")
+    print(f"📈 Marché Forex: {'🟢 OUVERT' if is_forex_open() else '🔴 FERMÉ'}")
     print(f"⏰ Début quotidien: {START_HOUR_HAITI}h00 AM (Haïti)")
-    print(f"📊 Signaux: Séquentiels après vérification")
+    print(f"📊 Signaux: Lundi-Vendredi uniquement")
     print("="*60 + "\n")
 
     ensure_db()
@@ -705,28 +518,31 @@ async def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler('start', cmd_start))
     app.add_handler(CommandHandler('stats', cmd_stats))
+    app.add_handler(CommandHandler('status', cmd_status))
+    app.add_handler(CommandHandler('clean', cmd_clean))
     app.add_handler(CommandHandler('verify', cmd_verify))
-    app.add_handler(CommandHandler('test', cmd_test))
-    app.add_handler(CommandHandler('force', cmd_force))
-    app.add_handler(CommandHandler('debug', cmd_debug))
-    app.add_handler(CommandHandler('check', cmd_check_signal))
-    app.add_handler(CommandHandler('debug_verify', cmd_debug_verification))  # NOUVELLE COMMANDE
 
     sched.start()
 
-    # CORRECTION: Planifier la vérification automatique toutes les 5 minutes
+    # Vérification automatique - SEULEMENT SI MARCHÉ OUVERT
+    async def conditional_verify():
+        if is_forex_open():
+            await auto_verifier.verify_pending_signals()
+    
     sched.add_job(
-        auto_verifier.verify_pending_signals,
+        conditional_verify,
         'interval',
         minutes=5,
         id='auto_verify'
     )
 
+    # Démarrer immédiatement si conditions OK
     if (now_haiti.hour >= START_HOUR_HAITI and now_haiti.hour < 18 and
-    now_haiti.weekday() <= 4 and not signal_queue_running):
-        print("🚀 Démarrage immédiat")
+        now_haiti.weekday() <= 4 and not signal_queue_running and is_forex_open()):
+        print("🚀 Démarrage immédiat de la session")
         asyncio.create_task(process_signal_queue(app))
 
+    # Planifier la session quotidienne
     sched.add_job(
         start_daily_signals,
         'cron',

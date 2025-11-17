@@ -142,8 +142,32 @@ def cleanup_weekend_signals():
             count = result.rowcount
             if count > 0:
                 print(f"🧹 {count} signaux du week-end nettoyés")
+            return count
     except Exception as e:
         print(f"⚠️ Erreur cleanup: {e}")
+        return 0
+
+def force_cleanup_weekend():
+    """Marque TOUS les signaux du week-end comme LOSE (même avec result)"""
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text("""
+                UPDATE signals 
+                SET result = 'LOSE', 
+                    reason = 'Signal créé/vérifié pendant marché fermé'
+                WHERE (result IS NULL OR result != 'LOSE')
+                AND (
+                    CAST(strftime('%w', ts_enter) AS INTEGER) = 6 OR  -- Samedi
+                    CAST(strftime('%w', ts_enter) AS INTEGER) = 0     -- Dimanche
+                )
+            """))
+            
+            count = result.rowcount
+            print(f"🧹 {count} signaux du week-end marqués comme LOSE")
+            return count
+    except Exception as e:
+        print(f"❌ Erreur force cleanup: {e}")
+        return 0
 
 def ensure_db():
     """Crée/met à jour la base de données"""
@@ -168,7 +192,10 @@ def ensure_db():
                 conn.execute(text("ALTER TABLE signals ADD COLUMN max_gales INTEGER DEFAULT 2"))    
             
             if 'winning_attempt' not in existing_cols:    
-                conn.execute(text("ALTER TABLE signals ADD COLUMN winning_attempt TEXT"))    
+                conn.execute(text("ALTER TABLE signals ADD COLUMN winning_attempt TEXT"))
+            
+            if 'reason' not in existing_cols:
+                conn.execute(text("ALTER TABLE signals ADD COLUMN reason TEXT"))
             
             print("✅ Base de données prête")
         
@@ -201,7 +228,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"/stats - Statistiques\n"
                     f"/verify - Vérifier signaux\n"
                     f"/status - État du bot\n"
-                    f"/clean - Nettoyer week-end"
+                    f"/clean - Nettoyer week-end\n"
+                    f"/forceclean - Nettoyage forcé"
                 )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
@@ -261,8 +289,17 @@ async def cmd_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Nettoie les signaux du week-end"""
     try:
         msg = await update.message.reply_text("🧹 Nettoyage en cours...")
-        cleanup_weekend_signals()
-        await msg.edit_text("✅ Signaux du week-end nettoyés!")
+        count = cleanup_weekend_signals()
+        await msg.edit_text(f"✅ {count} signaux du week-end nettoyés!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_force_clean(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force le nettoyage de TOUS les signaux invalides"""
+    try:
+        msg = await update.message.reply_text("🧹 Nettoyage forcé en cours...")
+        count = force_cleanup_weekend()
+        await msg.edit_text(f"✅ {count} signaux invalides marqués comme LOSE!")
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
@@ -520,6 +557,7 @@ async def main():
     app.add_handler(CommandHandler('stats', cmd_stats))
     app.add_handler(CommandHandler('status', cmd_status))
     app.add_handler(CommandHandler('clean', cmd_clean))
+    app.add_handler(CommandHandler('forceclean', cmd_force_clean))
     app.add_handler(CommandHandler('verify', cmd_verify))
 
     sched.start()

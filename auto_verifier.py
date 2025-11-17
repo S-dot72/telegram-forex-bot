@@ -27,6 +27,40 @@ class AutoResultVerifier:
             self.admin_chat_ids.append(chat_id)
             print(f"✅ Admin {chat_id} ajouté")
 
+    def _is_weekend(self, timestamp):
+        """Vérifie si le timestamp tombe le week-end (marché fermé)"""
+        if isinstance(timestamp, str):
+            ts_clean = timestamp.replace('Z', '').replace('+00:00', '').split('.')[0]
+            try:
+                dt = datetime.fromisoformat(ts_clean)
+            except:
+                try:
+                    dt = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M:%S')
+                except:
+                    return True  # En cas d'erreur, considérer comme week-end
+        else:
+            dt = timestamp
+        
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        
+        weekday = dt.weekday()  # 0=lundi, 6=dimanche
+        hour = dt.hour
+        
+        # Samedi : toujours fermé
+        if weekday == 5:
+            return True
+        
+        # Dimanche : fermé avant 22h UTC
+        if weekday == 6 and hour < 22:
+            return True
+        
+        # Vendredi : fermé après 22h UTC
+        if weekday == 4 and hour >= 22:
+            return True
+        
+        return False
+
     async def verify_pending_signals(self):
         """Vérifie tous les signaux qui n'ont pas encore de résultat - TOUT EN UTC"""
         try:
@@ -77,7 +111,28 @@ class AutoResultVerifier:
                     print(f"🔎 Signal #{signal_id} - {pair} {direction}")    
                     print(f"{'='*40}")    
                         
-                    # CORRECTION: Vérifier en UTC avec la fonction corrigée
+                    # Vérifier si c'est le week-end
+                    if self._is_weekend(ts_enter):
+                        print(f"🏖️ Signal du week-end - Marqué comme LOSE")
+                        self._update_signal_result(signal_id, 'LOSE', {
+                            'entry_price': 0,
+                            'exit_price': 0,
+                            'pips': 0,
+                            'gale_level': None,
+                            'reason': 'Marché fermé (week-end)'
+                        })
+                        verified_count += 1
+                        results.append({
+                            'signal_id': signal_id,
+                            'pair': pair,
+                            'direction': direction,
+                            'result': 'LOSE',
+                            'details': {'reason': 'Week-end'},
+                            'confidence': confidence
+                        })
+                        continue
+                    
+                    # Vérifier si signal complet
                     if not self._is_signal_complete_utc(ts_enter):    
                         skipped_count += 1    
                         print(f"➡️  SKIP - Signal pas prêt\n")    
@@ -143,15 +198,17 @@ class AutoResultVerifier:
     def _is_signal_complete_utc(self, ts_enter):
         """Vérifie si signal complet - VERSION CORRIGÉE"""
         try:
-            # CORRECTION: Parser timestamp de manière robuste
+            # Parser timestamp de manière robuste
             if isinstance(ts_enter, str):
-                # Nettoyer le timestamp
                 ts_clean = ts_enter.replace('Z', '').replace('+00:00', '').split('.')[0]
                 try:
                     entry_time_utc = datetime.fromisoformat(ts_clean)
                 except:
-                    # Essayer un autre format
-                    entry_time_utc = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M:%S')
+                    try:
+                        entry_time_utc = datetime.strptime(ts_clean, '%Y-%m-%d %H:%M:%S')
+                    except:
+                        print(f"   ❌ Format timestamp invalide: {ts_enter}")
+                        return False
             else:
                 entry_time_utc = ts_enter
             
@@ -186,7 +243,7 @@ class AutoResultVerifier:
     async def _verify_signal_with_gales(self, signal_id, pair, direction, ts_enter):
         """Vérifie signal avec gales - TOUT EN UTC, PAS DE CONVERSION"""
         try:
-            # CORRECTION: Parser timestamp de manière robuste
+            # Parser timestamp de manière robuste
             if isinstance(ts_enter, str):
                 ts_clean = ts_enter.replace('Z', '').replace('+00:00', '').split('.')[0]
                 try:
@@ -198,6 +255,17 @@ class AutoResultVerifier:
             
             if entry_time_utc.tzinfo is None:
                 entry_time_utc = entry_time_utc.replace(tzinfo=timezone.utc)
+            
+            # Vérifier si c'est le week-end
+            if self._is_weekend(entry_time_utc):
+                print(f"   🏖️ Signal du week-end - Marché fermé")
+                return 'LOSE', {
+                    'entry_price': 0,
+                    'exit_price': 0,
+                    'pips': 0,
+                    'gale_level': None,
+                    'reason': 'Marché fermé (week-end)'
+                }
 
             max_attempts = 3  # signal initial + 2 gales    
                 
@@ -269,24 +337,30 @@ class AutoResultVerifier:
             return None, None
 
     async def _get_price_at_time(self, pair, timestamp):
-        """Récupère prix à un moment donné (timestamp en UTC) - VERSION AMÉLIORÉE"""
+        """Récupère prix à un moment donné (timestamp en UTC) - VERSION OPTIMISÉE"""
         try:
             if timestamp.tzinfo is None:
                 timestamp = timestamp.replace(tzinfo=timezone.utc)
 
-            ts_utc = timestamp.astimezone(timezone.utc)    
+            ts_utc = timestamp.astimezone(timezone.utc)
             
-            # CORRECTION: Utiliser une plage plus large pour être sûr de trouver une bougie
-            start_dt = ts_utc - timedelta(minutes=10)    
-            end_dt = ts_utc + timedelta(minutes=10)    
+            # ⚠️ Vérifier si week-end AVANT l'appel API
+            if self._is_weekend(ts_utc):
+                print(f"   🏖️ Week-end détecté - Pas d'appel API")
+                return None
+            
+            # ⚠️ RÉDUIT : Plage de 5 minutes au lieu de 10
+            start_dt = ts_utc - timedelta(minutes=5)    
+            end_dt = ts_utc + timedelta(minutes=5)    
                 
             start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')    
             end_str = end_dt.strftime('%Y-%m-%d %H:%M:%S')    
                 
+            # ⚠️ RÉDUIT : outputsize 10 au lieu de 20
             params = {    
                 'symbol': pair,    
                 'interval': '1min',    
-                'outputsize': 20,    
+                'outputsize': 10,  # ← RÉDUIT pour économiser API
                 'apikey': self.api_key,    
                 'format': 'JSON',    
                 'start_date': start_str,    
@@ -297,7 +371,12 @@ class AutoResultVerifier:
                 
             resp = self._session.get(self.base_url, params=params, timeout=12)    
             resp.raise_for_status()    
-            data = resp.json()    
+            data = resp.json()
+            
+            # Vérifier limite API
+            if 'code' in data and data['code'] == 429:
+                print(f"   ⚠️  LIMITE API ATTEINTE")
+                return None
                 
             if 'values' in data and len(data['values']) > 0:    
                 closest_candle = None    
@@ -339,19 +418,22 @@ class AutoResultVerifier:
         """Met à jour résultat dans DB"""
         try:
             gale_level = 0
+            reason = details.get('reason', '') if details else ''
+            
             if details and isinstance(details, dict) and details.get('gale_level') is not None:
                 gale_level = details.get('gale_level', 0)
 
             query = text("""    
                 UPDATE signals     
-                SET result = :result, gale_level = :gale_level    
+                SET result = :result, gale_level = :gale_level, reason = :reason
                 WHERE id = :id    
             """)    
                 
             with self.engine.begin() as conn:    
                 conn.execute(query, {    
                     'result': result,    
-                    'gale_level': gale_level,    
+                    'gale_level': gale_level,
+                    'reason': reason,
                     'id': signal_id    
                 })    
                 
@@ -434,9 +516,14 @@ class AutoResultVerifier:
                         gale_names = ["Signal initial", "Gale 1", "Gale 2"]    
                         if gale_level < len(gale_names):    
                             gale_text = f" • {gale_names[gale_level]}"    
+                    elif r['details'].get('reason'):
+                        gale_text = f" • {r['details']['reason']}"
                     
                     report += f"{i}. {emoji} **{r['pair']}** {r['direction']}{gale_text}\n"    
-                    report += f"   📊 {r['details'].get('pips', 0):.1f} pips\n\n"    
+                    if r['details'].get('pips'):
+                        report += f"   📊 {r['details'].get('pips', 0):.1f} pips\n\n"
+                    else:
+                        report += "\n"
             else:    
                 report += "ℹ️ Aucun signal vérifié\n"    
                 if skipped_count > 0:    

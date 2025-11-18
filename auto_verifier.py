@@ -61,6 +61,69 @@ class AutoResultVerifier:
         
         return False
 
+    async def verify_single_signal(self, signal_id):
+        """Vérifie UN SEUL signal - utilisé pour le workflow signal par signal"""
+        try:
+            with self.engine.connect() as conn:
+                signal = conn.execute(
+                    text("""
+                        SELECT id, pair, direction, ts_enter, confidence
+                        FROM signals
+                        WHERE id = :sid AND result IS NULL
+                    """),
+                    {"sid": signal_id}
+                ).fetchone()
+            
+            if not signal:
+                print(f"⚠️ Signal #{signal_id} déjà vérifié ou inexistant")
+                return None
+            
+            signal_id, pair, direction, ts_enter, confidence = signal
+            
+            print(f"\n🔍 Vérification signal #{signal_id} - {pair} {direction}")
+            
+            # Vérifier si week-end
+            if self._is_weekend(ts_enter):
+                print(f"🏖️ Signal du week-end - Marqué comme LOSE")
+                self._update_signal_result(signal_id, 'LOSE', {
+                    'entry_price': 0,
+                    'exit_price': 0,
+                    'pips': 0,
+                    'gale_level': None,
+                    'reason': 'Marché fermé (week-end)'
+                })
+                return 'LOSE'
+            
+            # Vérifier si complet
+            if not self._is_signal_complete_utc(ts_enter):
+                print(f"⏳ Signal pas encore prêt")
+                return None
+            
+            # Vérifier avec gales
+            result, details = await self._verify_signal_with_gales(
+                signal_id, pair, direction, ts_enter
+            )
+            
+            if result:
+                self._update_signal_result(signal_id, result, details)
+                emoji = "✅" if result == 'WIN' else "❌"
+                print(f"{emoji} Résultat: {result}")
+                
+                if details and details.get('gale_level') is not None:
+                    gale_text = ["Signal initial", "Gale 1", "Gale 2"][details['gale_level']]
+                    print(f"   Gagné à: {gale_text}")
+                
+                return result
+            else:
+                print(f"⚠️ Impossible de vérifier")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Erreur verify_single_signal: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     async def verify_pending_signals(self):
         """Vérifie tous les signaux qui n'ont pas encore de résultat - TOUT EN UTC"""
         try:

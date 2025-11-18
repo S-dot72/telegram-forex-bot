@@ -397,43 +397,190 @@ async def send_pre_signal(pair, entry_time_haiti, app):
         print(f"❌ Erreur signal: {e}")
         return None
 
-async def send_verification_result(signal_id, app):
+async def send_verification_briefing(signal_id, app):
+    """Envoie un briefing détaillé après vérification d'un signal"""
     try:
         with engine.connect() as conn:
             signal = conn.execute(
-                text("SELECT pair, direction, result, gale_level FROM signals WHERE id = :sid"),
+                text("SELECT pair, direction, result, gale_level, confidence FROM signals WHERE id = :sid"),
                 {"sid": signal_id}
             ).fetchone()
 
         if not signal or not signal[2]:
+            print(f"⚠️ Signal #{signal_id} non vérifié")
             return
 
-        pair, direction, result, gale_level = signal    
-        user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]    
+        pair, direction, result, gale_level, confidence = signal
+        
+        with engine.connect() as conn:
+            user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
+        
+        # Construire le briefing
+        if result == "WIN":
+            emoji = "✅"
+            status = "GAGNÉ"
             
-        if result == "WIN":    
-            emoji, status = "✅", "GAGNÉ"    
-            gale_names = ["Signal initial", "Gale 1", "Gale 2"]    
-            gale_text = gale_names[gale_level] if gale_level < 3 else f"Gale {gale_level}"    
-        else:    
-            emoji, status, gale_text = "❌", "PERDU", "Après 3 tentatives"    
-            
-        msg = f"{emoji} {status}\n{pair} - {direction}\n{gale_text}"    
-            
-        for uid in user_ids:    
-            try:    
-                await app.bot.send_message(chat_id=uid, text=msg)    
-            except:    
-                pass    
-            
-        print(f"📤 Résultat envoyé: {status}")
+            # Déterminer quelle tentative a gagné
+            if gale_level == 0:
+                attempt_text = "🎯 Signal initial"
+            elif gale_level == 1:
+                attempt_text = "🔄 Gale 1"
+            elif gale_level == 2:
+                attempt_text = "🔄 Gale 2"
+            else:
+                attempt_text = f"🔄 Gale {gale_level}"
+        else:
+            emoji = "❌"
+            status = "PERDU"
+            attempt_text = "Aucune des 3 tentatives"
+        
+        direction_emoji = "📈" if direction == "CALL" else "📉"
+        
+        # Message de briefing
+        briefing = (
+            f"{emoji} **BRIEFING SIGNAL**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🎲 Résultat: **{status}**\n"
+            f"✨ Gagné par: {attempt_text}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        
+        # Envoyer à tous les abonnés
+        sent_count = 0
+        for uid in user_ids:
+            try:
+                await app.bot.send_message(chat_id=uid, text=briefing)
+                sent_count += 1
+            except Exception as e:
+                print(f"❌ Envoi briefing à {uid}: {e}")
+        
+        print(f"📤 Briefing envoyé à {sent_count} abonnés: {status} ({attempt_text})")
 
     except Exception as e:
-        print(f"❌ Erreur envoi résultat: {e}")
+        print(f"❌ Erreur envoi briefing: {e}")
+        import traceback
+        traceback.print_exc()
 
-# === FILE DE SIGNAUX ===
-
-async def process_signal_queue(app):
+async def send_daily_report(app):
+    """Envoie le rapport final après tous les signaux de la journée"""
+    try:
+        print("\n📊 Génération du rapport quotidien...")
+        
+        # Récupérer les stats de la journée
+        now_utc = datetime.now(timezone.utc)
+        start_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+        end_utc = start_utc + timedelta(days=1)
+        
+        with engine.connect() as conn:
+            # Stats globales
+            query = text("""
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN result = 'WIN' THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN result = 'LOSE' THEN 1 ELSE 0 END) as losses,
+                    SUM(CASE WHEN result = 'WIN' AND gale_level = 0 THEN 1 ELSE 0 END) as win_initial,
+                    SUM(CASE WHEN result = 'WIN' AND gale_level = 1 THEN 1 ELSE 0 END) as win_gale1,
+                    SUM(CASE WHEN result = 'WIN' AND gale_level = 2 THEN 1 ELSE 0 END) as win_gale2
+                FROM signals
+                WHERE ts_enter >= :start AND ts_enter < :end
+            """)
+            
+            stats = conn.execute(query, {
+                "start": start_utc.isoformat(),
+                "end": end_utc.isoformat()
+            }).fetchone()
+            
+            # Liste des signaux
+            signals_query = text("""
+                SELECT pair, direction, result, gale_level, confidence
+                FROM signals
+                WHERE ts_enter >= :start AND ts_enter < :end
+                ORDER BY ts_enter ASC
+            """)
+            
+            signals_list = conn.execute(signals_query, {
+                "start": start_utc.isoformat(),
+                "end": end_utc.isoformat()
+            }).fetchall()
+            
+            user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
+        
+        if not stats or stats[0] == 0:
+            print("⚠️ Aucun signal aujourd'hui")
+            return
+        
+        total, wins, losses, win_initial, win_gale1, win_gale2 = stats
+        verified = wins + losses
+        winrate = (wins / verified * 100) if verified > 0 else 0
+        
+        # Construire le rapport
+        now_haiti = get_haiti_now()
+        
+        report = (
+            f"📊 **RAPPORT QUOTIDIEN**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📅 Date: {now_haiti.strftime('%d/%m/%Y')}\n"
+            f"🕐 Heure: {now_haiti.strftime('%H:%M')} (Haïti)\n\n"
+            f"📈 **PERFORMANCE GLOBALE**\n"
+            f"• Total signaux: {total}\n"
+            f"• ✅ Gagnés: {wins}\n"
+            f"• ❌ Perdus: {losses}\n"
+            f"• 📊 Win rate: **{winrate:.1f}%**\n\n"
+        )
+        
+        if wins > 0:
+            report += (
+                f"🎯 **DÉTAIL DES GAINS**\n"
+                f"• Signal initial: {win_initial}\n"
+                f"• Gale 1: {win_gale1}\n"
+                f"• Gale 2: {win_gale2}\n\n"
+            )
+        
+        # Liste des signaux
+        if len(signals_list) > 0:
+            report += f"📋 **HISTORIQUE ({len(signals_list)} signaux)**\n\n"
+            
+            for i, sig in enumerate(signals_list, 1):
+                pair, direction, result, gale_level, confidence = sig
+                
+                if result == "WIN":
+                    emoji = "✅"
+                    if gale_level == 0:
+                        detail = "Signal"
+                    elif gale_level == 1:
+                        detail = "G1"
+                    elif gale_level == 2:
+                        detail = "G2"
+                    else:
+                        detail = f"G{gale_level}"
+                else:
+                    emoji = "❌"
+                    detail = "Perdu"
+                
+                report += f"{i}. {emoji} {pair} {direction} • {detail}\n"
+        
+        report += (
+            f"\n━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 Fin de la session quotidienne\n"
+            f"📅 Prochaine session: Demain {START_HOUR_HAITI}h00 AM"
+        )
+        
+        # Envoyer à tous les abonnés
+        sent_count = 0
+        for uid in user_ids:
+            try:
+                await app.bot.send_message(chat_id=uid, text=report)
+                sent_count += 1
+            except Exception as e:
+                print(f"❌ Envoi rapport à {uid}: {e}")
+        
+        print(f"✅ Rapport quotidien envoyé à {sent_count} abonnés")
+        print(f"📊 Win rate: {winrate:.1f}% ({wins}/{verified})")
+        
+    except Exception as e:
+        print(f"❌ Erreur rapport quotidien: {e}")
+        import traceback
+        traceback.print_exc()
     global signal_queue_running
 
     if not is_forex_open():
@@ -493,12 +640,19 @@ async def process_signal_queue(app):
                 
             print(f"🔍 Vérification...")    
                 
-            try:    
-                await auto_verifier.verify_pending_signals()    
-            except:    
-                pass    
+            try:
+                # Utiliser la vérification ciblée pour ce signal spécifique
+                result = await auto_verifier.verify_single_signal(signal_id)
                 
-            await send_verification_result(signal_id, app)    
+                if result:
+                    print(f"✅ Signal vérifié: {result}")
+                else:
+                    print(f"⚠️ Vérification impossible")
+            except Exception as e:
+                print(f"❌ Erreur vérification: {e}")    
+                
+            # Envoyer le briefing détaillé
+            await send_verification_briefing(signal_id, app)    
                 
             print(f"✅ Cycle {i+1} terminé\n")    
             await asyncio.sleep(30)    
@@ -506,6 +660,9 @@ async def process_signal_queue(app):
         print(f"\n{'='*60}")    
         print(f"🏁 SESSION TERMINÉE")    
         print(f"{'='*60}\n")
+        
+        # Envoyer le rapport quotidien final
+        await send_daily_report(app)
 
     except Exception as e:
         print(f"❌ Erreur: {e}")

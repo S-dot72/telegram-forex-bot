@@ -378,7 +378,8 @@ async def send_pre_signal(pair, entry_time_haiti, app):
         msg = (    
             f"📊 SIGNAL — {pair}\n\n"    
             f"🕐 Entrée: {entry_time_haiti.strftime('%H:%M')} (Haïti)\n\n"    
-            f"📈 Direction: {direction_text}\n\n"    
+            f"📈 Direction: {direction_text}\n\n"  
+            f"📈 Timeframe: M1 \n\n"
             f"🔄 Gale 1: {gale1_haiti.strftime('%H:%M')}\n"    
             f"🔄 Gale 2: {gale2_haiti.strftime('%H:%M')}\n\n"    
             f"💪 Confiance: {int(ml_conf*100)}%"    

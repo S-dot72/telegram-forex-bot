@@ -1,5 +1,5 @@
 """
-Bot de trading 
+Bot de trading
 """
 
 import os, json, asyncio
@@ -54,17 +54,14 @@ def is_forex_open():
     
     print(f"[FOREX CHECK] UTC: {now_utc.strftime('%A %H:%M')} | Weekday: {weekday} | Hour: {hour}")
     
-    # Samedi
     if weekday == 5:
         print(f"[FOREX CHECK] ❌ FERMÉ (Samedi)")
         return False
     
-    # Dimanche avant 22h UTC
     if weekday == 6 and hour < 22:
         print(f"[FOREX CHECK] ❌ FERMÉ (Dimanche avant 22h)")
         return False
     
-    # Vendredi après 22h UTC
     if weekday == 4 and hour >= 22:
         print(f"[FOREX CHECK] ❌ FERMÉ (Vendredi après 22h)")
         return False
@@ -146,27 +143,6 @@ def cleanup_weekend_signals():
         print(f"⚠️ Erreur cleanup: {e}")
         return 0
 
-def force_cleanup_weekend():
-    try:
-        with engine.begin() as conn:
-            result = conn.execute(text("""
-                UPDATE signals 
-                SET result = 'LOSE', 
-                    reason = 'Signal créé/vérifié pendant marché fermé'
-                WHERE (result IS NULL OR result != 'LOSE')
-                AND (
-                    CAST(strftime('%w', ts_enter) AS INTEGER) = 6 OR
-                    CAST(strftime('%w', ts_enter) AS INTEGER) = 0
-                )
-            """))
-            
-            count = result.rowcount
-            print(f"🧹 {count} signaux du week-end marqués comme LOSE")
-            return count
-    except Exception as e:
-        print(f"❌ Erreur force cleanup: {e}")
-        return 0
-
 def ensure_db():
     try:
         sql = open('db_schema.sql').read()
@@ -200,8 +176,6 @@ def ensure_db():
 
     except Exception as e:
         print(f"⚠️ Erreur DB: {e}")
-
-# === COMMANDES TELEGRAM ===
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -289,7 +263,6 @@ async def cmd_test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         msg = await update.message.reply_text("🚀 Démarrage session de test...")
         
-        # Force le démarrage
         app = context.application
         asyncio.create_task(process_signal_queue(app))
         
@@ -298,15 +271,13 @@ async def cmd_test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
 
-# === ENVOI DE SIGNAUX ===
-
 async def send_pre_signal(pair, entry_time_haiti, app):
     if not is_forex_open():
-        print("[SIGNAL] 🏖️ Marché fermé - Pas de signal")
+        print("[SIGNAL] 🏖️ Marché fermé")
         return None
     
     now_haiti = get_haiti_now()
-    print(f"\n[SIGNAL] 📤 Tentative {pair} - {now_haiti.strftime('%H:%M:%S')} (Haïti)")
+    print(f"\n[SIGNAL] 📤 Tentative {pair} - {now_haiti.strftime('%H:%M:%S')}")
 
     try:
         params = BEST_PARAMS.get(pair, {})
@@ -370,7 +341,6 @@ async def send_pre_signal(pair, entry_time_haiti, app):
         return None
 
 async def send_verification_briefing(signal_id, app):
-    """Envoie un briefing détaillé après vérification"""
     try:
         with engine.connect() as conn:
             signal = conn.execute(
@@ -417,21 +387,18 @@ async def send_verification_briefing(signal_id, app):
             f"━━━━━━━━━━━━━━━━━━━━"
         )
         
-        sent_count = 0
         for uid in user_ids:
             try:
                 await app.bot.send_message(chat_id=uid, text=briefing)
-                sent_count += 1
-            except Exception as e:
-                print(f"[BRIEFING] ❌ Envoi à {uid}: {e}")
+            except:
+                pass
         
-        print(f"[BRIEFING] ✅ Envoyé à {sent_count} abonnés: {status}")
+        print(f"[BRIEFING] ✅ Envoyé: {status}")
 
     except Exception as e:
         print(f"[BRIEFING] ❌ Erreur: {e}")
 
 async def send_daily_report(app):
-    """Rapport final après tous les signaux"""
     try:
         print("\n[RAPPORT] 📊 Génération...")
         
@@ -457,37 +424,22 @@ async def send_daily_report(app):
                 "end": end_utc.isoformat()
             }).fetchone()
             
-            signals_query = text("""
-                SELECT pair, direction, result, gale_level
-                FROM signals
-                WHERE ts_enter >= :start AND ts_enter < :end
-                ORDER BY ts_enter ASC
-            """)
-            
-            signals_list = conn.execute(signals_query, {
-                "start": start_utc.isoformat(),
-                "end": end_utc.isoformat()
-            }).fetchall()
-            
             user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
         
         if not stats or stats[0] == 0:
-            print("[RAPPORT] ⚠️ Aucun signal aujourd'hui")
             return
         
         total, wins, losses, win_initial, win_gale1, win_gale2 = stats
-        verified = wins + losses
-        winrate = (wins / verified * 100) if verified > 0 else 0
+        winrate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
         
         now_haiti = get_haiti_now()
         
         report = (
             f"📊 **RAPPORT QUOTIDIEN**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📅 Date: {now_haiti.strftime('%d/%m/%Y')}\n"
-            f"🕐 Heure: {now_haiti.strftime('%H:%M')} (Haïti)\n\n"
-            f"📈 **PERFORMANCE GLOBALE**\n"
-            f"• Total signaux: {total}\n"
+            f"📅 {now_haiti.strftime('%d/%m/%Y %H:%M')}\n\n"
+            f"📈 **PERFORMANCE**\n"
+            f"• Total: {total}\n"
             f"• ✅ Gagnés: {wins}\n"
             f"• ❌ Perdus: {losses}\n"
             f"• 📊 Win rate: **{winrate:.1f}%**\n\n"
@@ -495,94 +447,57 @@ async def send_daily_report(app):
         
         if wins > 0:
             report += (
-                f"🎯 **DÉTAIL DES GAINS**\n"
+                f"🎯 **DÉTAIL**\n"
                 f"• Signal initial: {win_initial}\n"
                 f"• Gale 1: {win_gale1}\n"
                 f"• Gale 2: {win_gale2}\n\n"
             )
         
-        if len(signals_list) > 0:
-            report += f"📋 **HISTORIQUE ({len(signals_list)} signaux)**\n\n"
-            
-            for i, sig in enumerate(signals_list, 1):
-                pair, direction, result, gale_level = sig
-                
-                if result == "WIN":
-                    emoji = "✅"
-                    if gale_level == 0:
-                        detail = "Signal"
-                    elif gale_level == 1:
-                        detail = "G1"
-                    elif gale_level == 2:
-                        detail = "G2"
-                    else:
-                        detail = f"G{gale_level}"
-                else:
-                    emoji = "❌"
-                    detail = "Perdu"
-                
-                report += f"{i}. {emoji} {pair} {direction} • {detail}\n"
-        
         report += (
-            f"\n━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 Fin de la session quotidienne\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
             f"📅 Prochaine session: Demain {START_HOUR_HAITI}h00 AM"
         )
         
-        sent_count = 0
         for uid in user_ids:
             try:
                 await app.bot.send_message(chat_id=uid, text=report)
-                sent_count += 1
-            except Exception as e:
-                print(f"[RAPPORT] ❌ Envoi à {uid}: {e}")
+            except:
+                pass
         
-        print(f"[RAPPORT] ✅ Envoyé à {sent_count} abonnés (Win rate: {winrate:.1f}%)")
+        print(f"[RAPPORT] ✅ Envoyé (Win rate: {winrate:.1f}%)")
         
     except Exception as e:
         print(f"[RAPPORT] ❌ Erreur: {e}")
 
-# === FILE DE SIGNAUX ===
-
 async def process_signal_queue(app):
     global signal_queue_running
 
-    print("\n[SESSION] 🔍 Vérification des conditions...")
-    print(f"[SESSION] - Marché ouvert: {is_forex_open()}")
-    print(f"[SESSION] - Session running: {signal_queue_running}")
+    print("\n[SESSION] 🔍 Vérification...")
+    print(f"[SESSION] - Marché: {is_forex_open()}")
+    print(f"[SESSION] - Running: {signal_queue_running}")
     
     if not is_forex_open():
-        print("[SESSION] 🏖️ Marché fermé - Annulée")
+        print("[SESSION] 🏖️ Marché fermé")
         return
 
     if signal_queue_running:
-        print("[SESSION] ⚠️ File déjà en cours")
+        print("[SESSION] ⚠️ Déjà en cours")
         return
 
     signal_queue_running = True
 
     try:
-        now_haiti = get_haiti_now()
-
-        print(f"\n{'='*60}")
-        print(f"[SESSION] 🚀 DÉBUT DE LA SESSION")
-        print(f"{'='*60}")
-        print(f"[SESSION] 🕐 Haïti: {now_haiti.strftime('%H:%M:%S')}")
-        print(f"[SESSION] 🌍 UTC: {get_utc_now().strftime('%H:%M:%S')}")
-        print(f"{'='*60}\n")
+        print(f"\n[SESSION] 🚀 DÉBUT")
         
         active_pairs = PAIRS[:2]
         
         for i in range(NUM_SIGNALS_PER_DAY):
             if not is_forex_open():
-                print("[SESSION] 🏖️ Marché fermé - Arrêt")
                 break
             
             pair = active_pairs[i % len(active_pairs)]
             
-            print(f"\n[SESSION] {'─'*60}")
-            print(f"[SESSION] 📍 SIGNAL {i+1}/{NUM_SIGNALS_PER_DAY} - {pair}")
-            print(f"[SESSION] {'─'*60}")
+            print(f"\n[SESSION] 📍 Signal {i+1}/{NUM_SIGNALS_PER_DAY} - {pair}")
             
             now_haiti = get_haiti_now()
             entry_time_haiti = now_haiti + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
@@ -595,37 +510,29 @@ async def process_signal_queue(app):
                 await asyncio.sleep(30)
             
             if not signal_id:
-                print(f"[SESSION] ❌ Aucun signal valide")
+                print(f"[SESSION] ❌ Aucun signal")
                 continue
             
             verification_time_haiti = entry_time_haiti + timedelta(minutes=VERIFICATION_WAIT_MIN)
-            now_haiti = get_haiti_now()
-            wait_seconds = (verification_time_haiti - now_haiti).total_seconds()
+            wait_seconds = (verification_time_haiti - get_haiti_now()).total_seconds()
             
             if wait_seconds > 0:
-                print(f"[SESSION] ⏳ Attente de {wait_seconds/60:.1f} min")
+                print(f"[SESSION] ⏳ Attente {wait_seconds/60:.1f}min")
                 await asyncio.sleep(wait_seconds)
             
             print(f"[SESSION] 🔍 Vérification...")
             
             try:
-                result = await auto_verifier.verify_single_signal(signal_id)
-                
-                if result:
-                    print(f"[SESSION] ✅ Vérifié: {result}")
-                else:
-                    print(f"[SESSION] ⚠️ Vérification impossible")
+                await auto_verifier.verify_single_signal(signal_id)
             except Exception as e:
-                print(f"[SESSION] ❌ Erreur vérification: {e}")
+                print(f"[SESSION] ❌ Erreur vérif: {e}")
             
             await send_verification_briefing(signal_id, app)
             
-            print(f"[SESSION] ✅ Cycle {i+1} terminé\n")
+            print(f"[SESSION] ✅ Cycle {i+1} terminé")
             await asyncio.sleep(30)
         
-        print(f"\n{'='*60}")
-        print(f"[SESSION] 🏁 SESSION TERMINÉE")
-        print(f"{'='*60}\n")
+        print(f"\n[SESSION] 🏁 FIN")
         
         await send_daily_report(app)
 
@@ -635,7 +542,79 @@ async def process_signal_queue(app):
         traceback.print_exc()
     finally:
         signal_queue_running = False
-        print("[SESSION] 🔓 Session déverrouillée")
 
 async def start_daily_signals(app):
-    """Démarre la session quotidienne -
+    now_haiti = get_haiti_now()
+    
+    print(f"\n[SCHEDULER] Déclenchement session à {now_haiti.strftime('%H:%M')}")
+    
+    if now_haiti.weekday() > 4:
+        print("[SCHEDULER] 🏖️ Week-end")
+        return
+    
+    if not is_forex_open():
+        print("[SCHEDULER] 🏖️ Marché fermé")
+        return
+
+    asyncio.create_task(process_signal_queue(app))
+
+async def main():
+    global auto_verifier
+
+    now_haiti = get_haiti_now()
+    now_utc = get_utc_now()
+
+    print("\n" + "="*60)
+    print("🤖 BOT DE TRADING - HAÏTI")
+    print("="*60)
+    print(f"🇭🇹 Haïti: {now_haiti.strftime('%H:%M:%S %Z')}")
+    print(f"🌍 UTC: {now_utc.strftime('%H:%M:%S %Z')}")
+    print(f"📈 Forex: {'🟢 OUVERT' if is_forex_open() else '🔴 FERMÉ'}")
+    print(f"⏰ Début: {START_HOUR_HAITI}h00 AM (Haïti)")
+    print("="*60 + "\n")
+
+    ensure_db()
+    auto_verifier = AutoResultVerifier(engine, TWELVEDATA_API_KEY)
+
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    app.add_handler(CommandHandler('start', cmd_start))
+    app.add_handler(CommandHandler('stats', cmd_stats))
+    app.add_handler(CommandHandler('status', cmd_status))
+    app.add_handler(CommandHandler('testsignal', cmd_test_signal))
+
+    sched.start()
+
+    sched.add_job(
+        start_daily_signals,
+        'cron',
+        hour=START_HOUR_HAITI,
+        minute=0,
+        timezone=HAITI_TZ,
+        args=[app],
+        id='daily_signals'
+    )
+
+    if (now_haiti.hour >= START_HOUR_HAITI and now_haiti.hour < 18 and
+        now_haiti.weekday() <= 4 and not signal_queue_running and is_forex_open()):
+        print("🚀 Démarrage immédiat")
+        asyncio.create_task(process_signal_queue(app))
+
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+
+    bot_info = await app.bot.get_me()
+    print(f"✅ BOT ACTIF: @{bot_info.username}\n")
+
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, SystemExit):
+        print("\n🛑 Arrêt...")
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+        sched.shutdown()
+
+if __name__ == '__main__':
+    asyncio.run(main())

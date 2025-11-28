@@ -60,11 +60,193 @@ def compute_indicators(df, ema_fast=8, ema_slow=21, rsi_len=14, bb_len=20):
     return df
 
 
+def rule_signal_ultra_strict(df):
+    """
+    🎯 STRATÉGIE ULTRA STRICTE POUR 90%+ WIN RATE
+    
+    Timeframe: M1 (1 minute)
+    Mode: SANS GALE - Chaque signal doit être gagnant
+    Objectif: 10 signaux/jour avec 90%+ de réussite
+    
+    CRITÈRES EXTRÊMEMENT STRICTS:
+    - Tendance forte confirmée (ADX > 30)
+    - Tous les indicateurs alignés (pas 2/3, mais 100%)
+    - Zones de prix optimales (pas d'extrêmes)
+    - Momentum fort et croissant
+    - Volatilité contrôlée
+    """
+    
+    if len(df) < 10:
+        return None
+    
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    prev2 = df.iloc[-3]
+    
+    # Vérifications de base
+    rsi = last.get('rsi')
+    adx = last.get('adx')
+    stoch_k = last.get('stoch_k')
+    stoch_d = last.get('stoch_d')
+    macd = last.get('MACD_12_26_9')
+    macd_signal = last.get('MACDs_12_26_9')
+    macd_hist = last.get('MACDh_12_26_9')
+    
+    if None in [rsi, adx, stoch_k, stoch_d, macd, macd_signal, macd_hist]:
+        return None
+    
+    # ========================================
+    # CRITÈRE 1: TENDANCE FORTE OBLIGATOIRE
+    # ========================================
+    # ADX > 30 = tendance très forte (essentiel pour M1)
+    if adx < 30:
+        return None
+    
+    # ========================================
+    # CRITÈRE 2: VOLATILITÉ CONTRÔLÉE
+    # ========================================
+    # ATR ne doit pas être trop élevé (éviter les marchés chaotiques)
+    atr = last.get('atr', 0)
+    atr_sma = df['atr'].rolling(20).mean().iloc[-1]
+    if atr > atr_sma * 1.5:  # Volatilité anormalement haute
+        return None
+    
+    # ========================================
+    # CRITÈRE 3: RSI DANS ZONE OPTIMALE
+    # ========================================
+    # Pour CALL: RSI entre 45-65 (ni survendu ni surachat)
+    # Pour PUT: RSI entre 35-55
+    rsi_too_low = rsi < 35
+    rsi_too_high = rsi > 65
+    
+    if rsi_too_low or rsi_too_high:
+        return None
+    
+    # ========================================
+    # ANALYSE CALL (BUY)
+    # ========================================
+    
+    # Direction EMA - DOIT être haussière
+    ema_bullish = (
+        last['ema_fast'] > last['ema_slow'] and
+        last['ema_slow'] > last['ema_50'] and
+        last['close'] > last['ema_50'] and
+        last['close'] > last['ema_200']
+    )
+    
+    # MACD - DOIT être haussier ET croissant
+    macd_bullish = (
+        macd > macd_signal and
+        macd_hist > 0 and
+        macd_hist > prev['MACDh_12_26_9'] and  # Momentum croissant
+        prev['MACDh_12_26_9'] > prev2['MACDh_12_26_9']  # Momentum confirmé
+    )
+    
+    # RSI - DOIT être dans la zone haussière
+    rsi_bullish = 45 < rsi < 65
+    
+    # Stochastic - DOIT confirmer sans être en surachat
+    stoch_bullish = (
+        stoch_k > stoch_d and
+        20 < stoch_k < 80 and
+        stoch_k > prev['stoch_k']  # Momentum haussier
+    )
+    
+    # ADX - Tendance haussière dominante
+    adx_bullish = last['adx_pos'] > last['adx_neg']
+    
+    # Prix au-dessus des bandes de Bollinger moyennes
+    bb_position = (last['close'] - last['BBL_20_2.0']) / (last['BBU_20_2.0'] - last['BBL_20_2.0'])
+    bb_bullish = 0.3 < bb_position < 0.7  # Pas d'extrêmes
+    
+    # Momentum de prix positif
+    price_momentum_up = (
+        last['close'] > prev['close'] and
+        prev['close'] > prev2['close']
+    )
+    
+    # ========================================
+    # DÉCISION CALL: TOUS LES CRITÈRES REQUIS
+    # ========================================
+    call_conditions = [
+        ema_bullish,
+        macd_bullish,
+        rsi_bullish,
+        stoch_bullish,
+        adx_bullish,
+        bb_bullish,
+        price_momentum_up
+    ]
+    
+    if all(call_conditions):
+        return 'CALL'
+    
+    # ========================================
+    # ANALYSE PUT (SELL)
+    # ========================================
+    
+    # Direction EMA - DOIT être baissière
+    ema_bearish = (
+        last['ema_fast'] < last['ema_slow'] and
+        last['ema_slow'] < last['ema_50'] and
+        last['close'] < last['ema_50'] and
+        last['close'] < last['ema_200']
+    )
+    
+    # MACD - DOIT être baissier ET décroissant
+    macd_bearish = (
+        macd < macd_signal and
+        macd_hist < 0 and
+        macd_hist < prev['MACDh_12_26_9'] and  # Momentum décroissant
+        prev['MACDh_12_26_9'] < prev2['MACDh_12_26_9']  # Momentum confirmé
+    )
+    
+    # RSI - DOIT être dans la zone baissière
+    rsi_bearish = 35 < rsi < 55
+    
+    # Stochastic - DOIT confirmer sans être en survente
+    stoch_bearish = (
+        stoch_k < stoch_d and
+        20 < stoch_k < 80 and
+        stoch_k < prev['stoch_k']  # Momentum baissier
+    )
+    
+    # ADX - Tendance baissière dominante
+    adx_bearish = last['adx_neg'] > last['adx_pos']
+    
+    # Prix en-dessous des bandes de Bollinger moyennes
+    bb_bearish = 0.3 < bb_position < 0.7  # Pas d'extrêmes
+    
+    # Momentum de prix négatif
+    price_momentum_down = (
+        last['close'] < prev['close'] and
+        prev['close'] < prev2['close']
+    )
+    
+    # ========================================
+    # DÉCISION PUT: TOUS LES CRITÈRES REQUIS
+    # ========================================
+    put_conditions = [
+        ema_bearish,
+        macd_bearish,
+        rsi_bearish,
+        stoch_bearish,
+        adx_bearish,
+        bb_bearish,
+        price_momentum_down
+    ]
+    
+    if all(put_conditions):
+        return 'PUT'
+    
+    # Si aucun signal n'est assez fort, NE PAS TRADER
+    return None
+
+
 def rule_signal(df):
     """
-    Stratégie de trading optimisée pour générer 20 signaux/jour
-    Confiance: 82-88% (balance entre qualité et quantité)
-    Compatible avec Pocket Option
+    Stratégie standard (utilisée pour compatibilité)
+    Pour les nouveaux signaux, utiliser rule_signal_ultra_strict()
     """
     
     if len(df) < 3:
@@ -107,7 +289,7 @@ def rule_signal(df):
     below_ema50 = last['close'] < last['ema_50']
     
     # Tendance présente (ADX)
-    has_trend = adx > 15  # Réduit pour plus de signaux
+    has_trend = adx > 15
     
     # Stochastic favorable
     stoch_bullish = 20 < stoch_k < 85

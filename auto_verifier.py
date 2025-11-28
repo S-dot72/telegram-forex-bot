@@ -338,7 +338,8 @@ class AutoResultVerifier:
             # Pour M1: entrée = maintenant, sortie = 1 minute après
             exit_time_utc = entry_time_utc + timedelta(minutes=1)
             
-            print(f"   📍 M1 Trading: {entry_time_utc.strftime('%H:%M')} → {exit_time_utc.strftime('%H:%M')} UTC")
+            print(f"   📍 M1 Trading: {entry_time_utc.strftime('%Y-%m-%d %H:%M:%S')} → {exit_time_utc.strftime('%H:%M:%S')} UTC")
+            print(f"   📈 Direction: {direction}")
             
             # Récupérer prix d'entrée
             entry_price = await self._get_price_at_time(pair, entry_time_utc)
@@ -354,16 +355,23 @@ class AutoResultVerifier:
                 print(f"   ⚠️  Prix de sortie M1 non disponible")
                 return None, None
             
+            # ⚠️ CORRECTION: Vérification stricte de la direction
+            price_diff = exit_price - entry_price
+            pips_diff = abs(price_diff) * 10000
+            
+            print(f"   💰 Prix entrée:  {entry_price:.5f}")
+            print(f"   💰 Prix sortie:  {exit_price:.5f}")
+            print(f"   📊 Différence:   {price_diff:+.5f} ({pips_diff:.1f} pips)")
+            
             # Calculer résultat
             if direction == 'CALL':
                 is_winning = exit_price > entry_price
+                print(f"   🎯 CALL: Besoin que sortie > entrée")
+                print(f"   🎯 {exit_price:.5f} > {entry_price:.5f} ? {is_winning}")
             else:  # PUT
                 is_winning = exit_price < entry_price
-            
-            pips_diff = abs(exit_price - entry_price) * 10000
-            
-            print(f"   💰 Entrée: {entry_price:.5f} | Sortie: {exit_price:.5f}")
-            print(f"   📊 Différence: {pips_diff:.1f} pips")
+                print(f"   🎯 PUT: Besoin que sortie < entrée")
+                print(f"   🎯 {exit_price:.5f} < {entry_price:.5f} ? {is_winning}")
             
             result = 'WIN' if is_winning else 'LOSE'
             
@@ -378,6 +386,9 @@ class AutoResultVerifier:
                 print(f"   ✅ WIN M1 (+{pips_diff:.1f} pips)")
             else:
                 print(f"   ❌ LOSE M1 (-{pips_diff:.1f} pips)")
+            
+            # ⚠️ IMPORTANT: Attendre 2 secondes pour laisser voir les logs
+            await asyncio.sleep(2)
             
             return result, details
             

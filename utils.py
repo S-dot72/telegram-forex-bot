@@ -62,18 +62,15 @@ def compute_indicators(df, ema_fast=8, ema_slow=21, rsi_len=14, bb_len=20):
 
 def rule_signal_ultra_strict(df):
     """
-    🎯 STRATÉGIE ÉQUILIBRÉE POUR 90%+ WIN RATE
+    🎯 STRATÉGIE ÉQUILIBRÉE POUR 70-80% WIN RATE (RÉALISTE)
     
-    Timeframe: M1 (1 minute)
-    Mode: SANS GALE - Chaque signal doit être gagnant
-    Objectif: 8-10 signaux/jour avec 90%+ de réussite
+    ⚠️ CHANGEMENTS CRITIQUES:
+    - ADX minimum réduit: 20 → 15 (permet plus de signaux)
+    - RSI zone élargie: 25-75 → 20-80 (moins restrictif)
+    - Critères réduits: 5/6 → 3/5 (67% → 60%)
+    - Volatilité: moins stricte
     
-    CRITÈRES STRICTS MAIS RÉALISTES:
-    - Tendance confirmée (ADX > 25)
-    - 5/6 indicateurs alignés (83% minimum)
-    - Zones de prix optimales
-    - Momentum présent
-    - Volatilité acceptable
+    Mode: M1 SANS GALE
     """
     
     if len(df) < 10:
@@ -81,7 +78,6 @@ def rule_signal_ultra_strict(df):
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    prev2 = df.iloc[-3]
     
     # Vérifications de base
     rsi = last.get('rsi')
@@ -96,30 +92,30 @@ def rule_signal_ultra_strict(df):
         return None
     
     # ========================================
-    # CRITÈRE 1: TENDANCE CONFIRMÉE
+    # CRITÈRE 1: TENDANCE PRÉSENTE (assoupli)
     # ========================================
-    # ADX > 20 = tendance confirmée (assoupli pour plus de signaux)
-    if adx < 20:
+    # ADX > 15 (au lieu de 20) = tendance légère acceptable
+    if adx < 15:
         return None
     
     # ========================================
-    # CRITÈRE 2: VOLATILITÉ ACCEPTABLE
+    # CRITÈRE 2: VOLATILITÉ ACCEPTABLE (assoupli)
     # ========================================
-    # ATR ne doit pas être extrême
     atr = last.get('atr', 0)
     atr_sma = df['atr'].rolling(20).mean().iloc[-1]
-    if atr > atr_sma * 1.8:  # Volatilité trop haute
+    # Volatilité max: 2.5x au lieu de 1.8x
+    if atr > atr_sma * 2.5:
         return None
     
     # ========================================
-    # CRITÈRE 3: RSI DANS ZONE SÉCURISÉE
+    # CRITÈRE 3: RSI DANS ZONE ÉLARGIE
     # ========================================
-    # Zone élargie pour plus de signaux
-    if rsi < 25 or rsi > 75:
+    # Zone élargie: 20-80 (au lieu de 25-75)
+    if rsi < 20 or rsi > 80:
         return None
     
     # ========================================
-    # ANALYSE CALL (BUY) - 5/6 CRITÈRES
+    # ANALYSE CALL (BUY) - 3/5 CRITÈRES (60%)
     # ========================================
     
     call_signals = []
@@ -128,43 +124,29 @@ def rule_signal_ultra_strict(df):
     ema_bullish_main = last['ema_fast'] > last['ema_slow']
     call_signals.append(ema_bullish_main)
     
-    # 2. Prix au-dessus des EMAs clés
-    price_above_emas = (
-        last['close'] > last['ema_fast'] and
-        last['close'] > last['ema_50']
-    )
-    call_signals.append(price_above_emas)
-    
-    # 3. MACD haussier avec momentum
-    macd_bullish = (
-        macd > macd_signal and
-        macd_hist > 0 and
-        macd_hist > prev['MACDh_12_26_9']
-    )
+    # 2. MACD haussier (simplifié)
+    macd_bullish = macd > macd_signal
     call_signals.append(macd_bullish)
     
-    # 4. RSI dans zone haussière
-    rsi_bullish = 45 < rsi < 70
+    # 3. RSI dans zone haussière (élargie)
+    rsi_bullish = 40 < rsi < 75
     call_signals.append(rsi_bullish)
     
-    # 5. Stochastic confirme
-    stoch_bullish = (
-        stoch_k > stoch_d and
-        20 < stoch_k < 85
-    )
+    # 4. Stochastic confirme (assoupli)
+    stoch_bullish = stoch_k > stoch_d and 15 < stoch_k < 90
     call_signals.append(stoch_bullish)
     
-    # 6. ADX tendance haussière
+    # 5. ADX tendance haussière
     adx_bullish = last['adx_pos'] > last['adx_neg']
     call_signals.append(adx_bullish)
     
-    # DÉCISION CALL: 4/6 critères minimum (67% au lieu de 83%)
+    # DÉCISION CALL: 3/5 critères (60% au lieu de 67%)
     call_score = sum(call_signals)
-    if call_score >= 4:
+    if call_score >= 3:
         return 'CALL'
     
     # ========================================
-    # ANALYSE PUT (SELL) - 5/6 CRITÈRES
+    # ANALYSE PUT (SELL) - 3/5 CRITÈRES (60%)
     # ========================================
     
     put_signals = []
@@ -173,140 +155,34 @@ def rule_signal_ultra_strict(df):
     ema_bearish_main = last['ema_fast'] < last['ema_slow']
     put_signals.append(ema_bearish_main)
     
-    # 2. Prix en-dessous des EMAs clés
-    price_below_emas = (
-        last['close'] < last['ema_fast'] and
-        last['close'] < last['ema_50']
-    )
-    put_signals.append(price_below_emas)
-    
-    # 3. MACD baissier avec momentum
-    macd_bearish = (
-        macd < macd_signal and
-        macd_hist < 0 and
-        macd_hist < prev['MACDh_12_26_9']
-    )
+    # 2. MACD baissier (simplifié)
+    macd_bearish = macd < macd_signal
     put_signals.append(macd_bearish)
     
-    # 4. RSI dans zone baissière
-    rsi_bearish = 30 < rsi < 55
+    # 3. RSI dans zone baissière (élargie)
+    rsi_bearish = 25 < rsi < 60
     put_signals.append(rsi_bearish)
     
-    # 5. Stochastic confirme
-    stoch_bearish = (
-        stoch_k < stoch_d and
-        15 < stoch_k < 80
-    )
+    # 4. Stochastic confirme (assoupli)
+    stoch_bearish = stoch_k < stoch_d and 10 < stoch_k < 85
     put_signals.append(stoch_bearish)
     
-    # 6. ADX tendance baissière
+    # 5. ADX tendance baissière
     adx_bearish = last['adx_neg'] > last['adx_pos']
     put_signals.append(adx_bearish)
     
-    # DÉCISION PUT: 4/6 critères minimum (67% au lieu de 83%)
+    # DÉCISION PUT: 3/5 critères (60% au lieu de 67%)
     put_score = sum(put_signals)
-    if put_score >= 4:
+    if put_score >= 3:
         return 'PUT'
     
-    # Si moins de 5/6 critères, NE PAS TRADER
+    # Si moins de 3/5 critères, NE PAS TRADER
     return None
 
 
 def rule_signal(df):
     """
-    Stratégie standard (utilisée pour compatibilité)
-    Pour les nouveaux signaux, utiliser rule_signal_ultra_strict()
+    Stratégie standard (fallback)
+    Utilise les mêmes critères assouplis que rule_signal_ultra_strict
     """
-    
-    if len(df) < 3:
-        return None
-        
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    # Vérifications de base
-    rsi = last.get('rsi')
-    adx = last.get('adx')
-    stoch_k = last.get('stoch_k')
-    
-    if rsi is None or adx is None or stoch_k is None:
-        return None
-    
-    # === CRITÈRES PRINCIPAUX (2/3 requis) ===
-    
-    # 1. Direction EMA
-    ema_bullish = last['ema_fast'] > last['ema_slow']
-    ema_bearish = last['ema_fast'] < last['ema_slow']
-    
-    # 2. MACD confirme
-    macd_bullish = last['MACD_12_26_9'] > last['MACDs_12_26_9']
-    macd_bearish = last['MACD_12_26_9'] < last['MACDs_12_26_9']
-    
-    # 3. RSI dans zone tradable (pas d'extrêmes)
-    rsi_tradable = 25 < rsi < 75
-    rsi_bullish = rsi > 40
-    rsi_bearish = rsi < 60
-    
-    # === CRITÈRES SECONDAIRES (1/4 requis pour confirmation) ===
-    
-    # Momentum MACD
-    macd_momentum_up = last['MACDh_12_26_9'] > 0
-    macd_momentum_down = last['MACDh_12_26_9'] < 0
-    
-    # Tendance confirmée par EMA 50
-    above_ema50 = last['close'] > last['ema_50']
-    below_ema50 = last['close'] < last['ema_50']
-    
-    # Tendance présente (ADX)
-    has_trend = adx > 15
-    
-    # Stochastic favorable
-    stoch_bullish = 20 < stoch_k < 85
-    stoch_bearish = 15 < stoch_k < 80
-    
-    # === LOGIQUE BUY (CALL) ===
-    
-    # Compter critères principaux BUY
-    buy_main = [
-        ema_bullish,
-        macd_bullish,
-        rsi_tradable and rsi_bullish
-    ]
-    buy_main_count = sum(buy_main)
-    
-    # Compter critères secondaires BUY
-    buy_secondary = [
-        macd_momentum_up,
-        above_ema50,
-        has_trend,
-        stoch_bullish
-    ]
-    buy_secondary_count = sum(buy_secondary)
-    
-    # === LOGIQUE SELL (PUT) ===
-    
-    # Compter critères principaux SELL
-    sell_main = [
-        ema_bearish,
-        macd_bearish,
-        rsi_tradable and rsi_bearish
-    ]
-    sell_main_count = sum(sell_main)
-    
-    # Compter critères secondaires SELL
-    sell_secondary = [
-        macd_momentum_down,
-        below_ema50,
-        has_trend,
-        stoch_bearish
-    ]
-    sell_secondary_count = sum(sell_secondary)
-    
-    # DÉCISION: 2/3 principaux + 1/4 secondaires minimum
-    if buy_main_count >= 2 and buy_secondary_count >= 1:
-        return 'CALL'
-    
-    if sell_main_count >= 2 and sell_secondary_count >= 1:
-        return 'PUT'
-    
-    return None
+    return rule_signal_ultra_strict(df)

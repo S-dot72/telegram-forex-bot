@@ -64,7 +64,7 @@ class AutoResultVerifier:
     async def verify_single_signal(self, signal_id):
         """
         Vérifie UN SEUL signal en M1 SANS GALE
-        Vérification immédiate 1 minute après l'entrée
+        Vérification immédiate 2 minutes après l'entrée
         """
         try:
             with self.engine.connect() as conn:
@@ -261,7 +261,7 @@ class AutoResultVerifier:
     def _is_signal_complete_m1(self, ts_enter):
         """
         Vérifie si signal M1 est complet
-        Pour M1: seulement 1 minute d'attente après l'entrée
+        Pour M1: 2 minutes d'attente après l'entrée pour avoir les données API
         """
         try:
             # Parser timestamp
@@ -284,8 +284,8 @@ class AutoResultVerifier:
             else:
                 entry_time_utc = entry_time_utc.astimezone(timezone.utc)
 
-            # Pour M1: vérification 2 minutes après l'entrée (au lieu de 1)
-            # Donne plus de marge pour que l'API ait les données
+            # Pour M1: vérification 2 minutes après l'entrée
+            # Donne le temps pour que l'API ait les données de la bougie
             end_time_utc = entry_time_utc + timedelta(minutes=2)
             
             now_utc = datetime.now(timezone.utc)
@@ -312,8 +312,9 @@ class AutoResultVerifier:
 
     async def _verify_signal_m1(self, signal_id, pair, direction, ts_enter):
         """
-        Vérifie signal M1 SANS GALE
-        Une seule tentative - Win ou Lose immédiat
+        ⚠️ CORRECTION CRITIQUE: Vérifier la BOUGIE D'ENTRÉE M1
+        Pour M1, on vérifie la bougie où le trade est entré (pas la suivante)
+        Exemple: Signal à 20:44:37 → vérifier bougie 20:44-20:45 (pas 20:45-20:46)
         """
         try:
             # Parser timestamp
@@ -340,50 +341,46 @@ class AutoResultVerifier:
                     'reason': 'Marché fermé (week-end)'
                 }
 
-            # Pour M1: entrée = maintenant, sortie = 1 minute après
-            exit_time_utc = entry_time_utc + timedelta(minutes=1)
+            # ⚠️ CORRECTION CRITIQUE: Arrondir au début de la minute
+            # Pour M1, on vérifie la bougie D'ENTRÉE (pas la suivante)
+            # Exemple: Signal à 20:44:37 → vérifier bougie 20:44-20:45
+            entry_minute = entry_time_utc.replace(second=0, microsecond=0)
+            exit_minute = entry_minute + timedelta(minutes=1)
             
-            print(f"   📍 M1 Trading: {entry_time_utc.strftime('%Y-%m-%d %H:%M:%S')} → {exit_time_utc.strftime('%H:%M:%S')} UTC")
+            print(f"   📍 M1 Trading: Bougie {entry_minute.strftime('%H:%M')}-{exit_minute.strftime('%H:%M')} UTC")
             print(f"   📈 Direction: {direction}")
             
-            # Récupérer prix d'entrée
-            entry_price = await self._get_price_at_time(pair, entry_time_utc)
+            # Récupérer prix d'entrée (ouverture de la bougie)
+            entry_price = await self._get_price_at_time(pair, entry_minute)
             if entry_price is None:
                 print(f"   ⚠️  Prix d'entrée M1 non disponible")
                 return None, None
             
             await asyncio.sleep(0.5)
             
-            # Récupérer prix de sortie (1 minute après)
-            exit_price = await self._get_price_at_time(pair, exit_time_utc)
+            # Récupérer prix de sortie (fermeture de la bougie)
+            exit_price = await self._get_price_at_time(pair, exit_minute)
             if exit_price is None:
                 print(f"   ⚠️  Prix de sortie M1 non disponible")
                 return None, None
             
-            # ⚠️ CORRECTION: Vérification stricte avec marge broker
+            # Calculer résultat
             price_diff = exit_price - entry_price
             pips_diff = abs(price_diff) * 10000
-            
-            # ⚠️ IMPORTANT: Marge de sécurité pour spread + commission
-            # EUR/USD spread ≈ 1-2 pips + commission ≈ 0.5 pips = 2 pips minimum (assoupli)
-            MIN_PIPS_TO_WIN = 2.0  # Réduit de 3 à 2 pips
             
             print(f"   💰 Prix entrée:  {entry_price:.5f}")
             print(f"   💰 Prix sortie:  {exit_price:.5f}")
             print(f"   📊 Différence:   {price_diff:+.5f} ({pips_diff:.1f} pips)")
-            print(f"   ⚠️  Marge requise: {MIN_PIPS_TO_WIN} pips (spread + commission)")
             
-            # Calculer résultat AVEC marge de sécurité
+            # Vérification par direction (sans marge minimale)
             if direction == 'CALL':
-                is_winning = (exit_price > entry_price) and (pips_diff >= MIN_PIPS_TO_WIN)
-                print(f"   🎯 CALL: Besoin que sortie > entrée ET gain ≥ {MIN_PIPS_TO_WIN} pips")
-                print(f"   🎯 {exit_price:.5f} > {entry_price:.5f} ? {exit_price > entry_price}")
-                print(f"   🎯 {pips_diff:.1f} ≥ {MIN_PIPS_TO_WIN} pips ? {pips_diff >= MIN_PIPS_TO_WIN}")
+                is_winning = exit_price > entry_price
+                print(f"   🎯 CALL: Besoin que sortie > entrée")
+                print(f"   🎯 {exit_price:.5f} > {entry_price:.5f} ? {is_winning}")
             else:  # PUT
-                is_winning = (exit_price < entry_price) and (pips_diff >= MIN_PIPS_TO_WIN)
-                print(f"   🎯 PUT: Besoin que sortie < entrée ET gain ≥ {MIN_PIPS_TO_WIN} pips")
-                print(f"   🎯 {exit_price:.5f} < {entry_price:.5f} ? {exit_price < entry_price}")
-                print(f"   🎯 {pips_diff:.1f} ≥ {MIN_PIPS_TO_WIN} pips ? {pips_diff >= MIN_PIPS_TO_WIN}")
+                is_winning = exit_price < entry_price
+                print(f"   🎯 PUT: Besoin que sortie < entrée")
+                print(f"   🎯 {exit_price:.5f} < {entry_price:.5f} ? {is_winning}")
             
             result = 'WIN' if is_winning else 'LOSE'
             
@@ -398,9 +395,6 @@ class AutoResultVerifier:
                 print(f"   ✅ WIN M1 (+{pips_diff:.1f} pips)")
             else:
                 print(f"   ❌ LOSE M1 (-{pips_diff:.1f} pips)")
-            
-            # ⚠️ IMPORTANT: Attendre 2 secondes pour laisser voir les logs
-            await asyncio.sleep(2)
             
             return result, details
             

@@ -1,5 +1,5 @@
 """
-Bot de trading - 10 signaux/jour avec 90% de win rate
+Bot de trading - 10 signaux/jour avec 70-80% de win rate
 """
 
 import os, json, asyncio
@@ -22,7 +22,7 @@ from ml_continuous_learning import ContinuousLearning, scheduled_retraining
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
 START_HOUR_HAITI = 9
 DELAY_BEFORE_ENTRY_MIN = 3  # Entrée 3 minutes après envoi du signal
-VERIFICATION_WAIT_MIN = 1  # Vérification 1 minute après entrée (M1)
+VERIFICATION_WAIT_MIN = 2  # ⚠️ CORRECTION: 2 minutes (au lieu de 1) pour M1
 NUM_SIGNALS_PER_DAY = 10  # 10 signaux premium/jour
 SIGNAL_INTERVAL_MINUTES = 30  # Signal toutes les 30 minutes
 
@@ -194,25 +194,41 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 {"uid": user_id, "uname": username})
                 await update.message.reply_text(
                     f"✅ Bienvenue !\n\n"
-                    f"📊 {NUM_SIGNALS_PER_DAY} signaux PREMIUM/jour\n"
-                    f"🎯 Win rate cible: 90%+\n"
+                    f"📊 {NUM_SIGNALS_PER_DAY} signaux/jour\n"
+                    f"🎯 Win rate cible: 70-80%\n"
                     f"⏰ Début: {START_HOUR_HAITI}h00 AM (Haïti)\n"
                     f"🔄 Lundi-Vendredi (marché Forex)\n"
                     f"⚡ Signal toutes les 30 minutes\n"
                     f"📍 Timeframe: M1 (1 minute)\n"
                     f"⏰ Signal envoyé: 3 min AVANT l'entrée\n"
-                    f"🔍 Vérification: 1 min après entrée\n"
+                    f"🔍 Vérification: 2 min après entrée\n"
                     f"🚫 SANS GALE (haute précision)\n\n"
-                    f"Commandes:\n"
-                    f"/stats - Statistiques\n"
-                    f"/status - État du bot\n"
-                    f"/rapport - Rapport du jour\n"
-                    f"/mlstats - Stats ML\n"
-                    f"/retrain - Réentraîner ML\n"
-                    f"/testsignal - Forcer un signal de test"
+                    f"📋 Tapez /menu pour voir toutes les commandes"
                 )
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Affiche la liste des commandes disponibles"""
+    menu_text = (
+        "📋 **MENU DES COMMANDES**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📊 **Statistiques & Info:**\n"
+        "• /stats - Voir les statistiques générales\n"
+        "• /status - État actuel du bot\n"
+        "• /rapport - Rapport du jour en cours\n\n"
+        "🤖 **Machine Learning:**\n"
+        "• /mlstats - Statistiques ML\n"
+        "• /retrain - Réentraîner le modèle ML\n\n"
+        "🔧 **Contrôles:**\n"
+        "• /testsignal - Forcer un signal de test\n"
+        "• /menu - Afficher ce menu\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 Mode actif: M1 SANS GALE\n"
+        f"⚡ {NUM_SIGNALS_PER_DAY} signaux premium/jour\n"
+        f"📈 Win rate cible: 70-80%"
+    )
+    await update.message.reply_text(menu_text)
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
@@ -235,7 +251,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"📈 Win rate: {winrate:.1f}%\n"
         msg += f"👥 Abonnés: {subs}\n\n"
         msg += f"🎯 **Mode actif:** SANS GALE\n"
-        msg += f"⚡ {NUM_SIGNALS_PER_DAY} signaux premium/jour"
+        msg += f"⚡ {NUM_SIGNALS_PER_DAY} signaux/jour"
         
         await update.message.reply_text(msg)
 
@@ -253,11 +269,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"🌍 UTC: {now_utc.strftime('%a %H:%M:%S')}\n"
         msg += f"📈 Forex: {'🟢 OUVERT' if forex_open else '🔴 FERMÉ'}\n"
         msg += f"🔄 Session: {'✅ Active' if signal_queue_running else '⏸️ Inactive'}\n"
-        msg += f"🎯 Mode: SANS GALE (90% WR)\n"
+        msg += f"🎯 Mode: SANS GALE (70-80% WR)\n"
         msg += f"⚡ Intervalle: 30 minutes\n"
         msg += f"📍 Timeframe: M1\n"
         msg += f"⏰ Signal: 3 min AVANT entrée\n"
-        msg += f"🔍 Vérification: 1 min après entrée\n\n"
+        msg += f"🔍 Vérification: 2 min après entrée\n\n"
         
         if not forex_open:
             if now_utc.weekday() == 6 and now_utc.hour < 22:
@@ -407,6 +423,10 @@ async def cmd_test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Erreur: {e}")
 
 async def send_pre_signal(pair, entry_time_haiti, app):
+    """
+    Envoie un signal 3 minutes AVANT l'entrée
+    Seuil ML: 70% (au lieu de 85%)
+    """
     if not is_forex_open():
         print("[SIGNAL] 🏖️ Marché fermé")
         return None
@@ -427,30 +447,29 @@ async def send_pre_signal(pair, entry_time_haiti, app):
                                 rsi_len=params.get('rsi',14),
                                 bb_len=params.get('bb',20))
         
-        # ⚡ ULTRA STRICT pour 90% WR
+        # Stratégie assouplie
         base_signal = rule_signal_ultra_strict(df)
         
         if not base_signal:
-            print("[SIGNAL] ⏭️ Pas de signal ultra-strict")
+            print("[SIGNAL] ⏭️ Pas de signal (stratégie)")
             return None
         
-        # ML avec seuil élevé
+        # ML avec seuil RÉDUIT à 70%
         ml_signal, ml_conf = ml_predictor.predict_signal(df, base_signal)
-        if ml_signal is None or ml_conf < 0.85:  # ← Seuil relevé à 85%
+        if ml_signal is None or ml_conf < 0.70:
             print(f"[SIGNAL] ❌ Rejeté par ML ({ml_conf:.1%})")
             return None
         
-        # ⚠️ CORRECTION: entry_time_haiti est dans 3 minutes (pas 1)
         entry_time_haiti = now_haiti + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
         entry_time_utc = entry_time_haiti.astimezone(timezone.utc)
         
         print(f"[SIGNAL] 📤 Signal trouvé ! Entrée prévue: {entry_time_haiti.strftime('%H:%M')} (dans {DELAY_BEFORE_ENTRY_MIN} min)")
         
         payload = {
-            'pair': pair, 'direction': ml_signal, 'reason': f'ML Ultra {ml_conf:.1%}',
+            'pair': pair, 'direction': ml_signal, 'reason': f'ML {ml_conf:.1%}',
             'ts_enter': entry_time_utc.isoformat(), 'ts_send': get_utc_now().isoformat(),
             'confidence': ml_conf, 'payload': json.dumps({'pair': pair}),
-            'max_gales': 0  # ← SANS GALE
+            'max_gales': 0
         }
         signal_id = persist_signal(payload)
         
@@ -460,14 +479,14 @@ async def send_pre_signal(pair, entry_time_haiti, app):
         direction_text = "BUY" if ml_signal == "CALL" else "SELL"
         
         msg = (
-            f"🎯 SIGNAL PREMIUM — {pair}\n\n"
+            f"🎯 SIGNAL — {pair}\n\n"
             f"🕐 Entrée: {entry_time_haiti.strftime('%H:%M')} (Haïti)\n"
             f"📍 Timeframe: M1 (1 minute)\n\n"
             f"📈 Direction: **{direction_text}**\n\n"
-            f"⚡ Mode: SANS GALE (haute précision)\n"
+            f"⚡ Mode: SANS GALE\n"
             f"💪 Confiance: **{int(ml_conf*100)}%**\n"
-            f"🔍 Vérification: 1 min après entrée\n\n"
-            f"🎯 Win rate cible: 90%+"
+            f"🔍 Vérification: 2 min après entrée\n\n"
+            f"🎯 Win rate cible: 70-80%"
         )
         
         for uid in user_ids:
@@ -628,6 +647,10 @@ async def send_daily_report(app):
         traceback.print_exc()
 
 async def process_signal_queue(app):
+    """
+    ⚠️ CORRECTION CRITIQUE: Attente de 2 minutes pour vérification M1
+    Tentatives réduites: 3 au lieu de 5
+    """
     global signal_queue_running
 
     print("\n[SESSION] 🔍 Vérification...")
@@ -645,9 +668,9 @@ async def process_signal_queue(app):
     signal_queue_running = True
 
     try:
-        print(f"\n[SESSION] 🚀 DÉBUT - Mode ULTRA STRICT (90% WR)")
+        print(f"\n[SESSION] 🚀 DÉBUT - Mode ÉQUILIBRÉ (70-80% WR)")
         print(f"[SESSION] ⚡ Signaux toutes les 30 minutes")
-        print(f"[SESSION] 📍 Timeframe M1 - Vérification 1 min après entrée")
+        print(f"[SESSION] 📍 Timeframe M1 - Vérification 2 min après entrée")
         
         active_pairs = PAIRS[:3]
         signals_sent = 0
@@ -662,28 +685,26 @@ async def process_signal_queue(app):
             print(f"[SESSION] ⏰ Analyse du marché en temps réel...")
             
             now_haiti = get_haiti_now()
-            
-            # ⚠️ CORRECTION IMPORTANTE: L'heure d'entrée est dans 3 minutes
             entry_time_haiti = now_haiti + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
             
             print(f"[SESSION] 🎯 Signal sera envoyé pour entrée à {entry_time_haiti.strftime('%H:%M')}")
             
-            # Tenter jusqu'à 5 fois pour trouver un signal ultra-strict
+            # ⚠️ CORRECTION: 3 tentatives au lieu de 5
             signal_id = None
-            for attempt in range(5):
-                print(f"[SESSION] 🔍 Tentative {attempt+1}/5 d'analyse...")
+            for attempt in range(3):  # ← 3 au lieu de 5
+                print(f"[SESSION] 🔍 Tentative {attempt+1}/3 d'analyse...")
                 signal_id = await send_pre_signal(pair, entry_time_haiti, app)
                 if signal_id:
                     signals_sent += 1
                     print(f"[SESSION] ✅ Signal trouvé et envoyé !")
                     break
                 
-                if attempt < 4:  # Pas d'attente après la dernière tentative
+                if attempt < 2:  # Pas d'attente après la dernière tentative
                     print(f"[SESSION] ⏳ Attente 20s avant nouvelle tentative...")
                     await asyncio.sleep(20)
             
             if not signal_id:
-                print(f"[SESSION] ❌ Aucun signal ultra-strict après 5 tentatives")
+                print(f"[SESSION] ❌ Aucun signal après 3 tentatives")
                 print(f"[SESSION] 📊 Marché non favorable pour {pair}")
                 continue
             
@@ -693,18 +714,23 @@ async def process_signal_queue(app):
                 print(f"[SESSION] ⏳ Attente entrée: {wait_to_entry/60:.1f} min")
                 await asyncio.sleep(wait_to_entry)
             
-            # Attendre 1 minute supplémentaire pour vérification M1
+            # ⚠️ CORRECTION CRITIQUE: Attendre 2 minutes (au lieu de 1) pour M1
+            # M1 nécessite: entrée T → sortie T+1min → données API T+2min
             verification_time_haiti = entry_time_haiti + timedelta(minutes=VERIFICATION_WAIT_MIN)
             wait_to_verify = (verification_time_haiti - get_haiti_now()).total_seconds()
             
             if wait_to_verify > 0:
-                print(f"[SESSION] ⏳ Attente vérification M1: {wait_to_verify:.0f}s")
+                print(f"[SESSION] ⏳ Attente vérification M1: {wait_to_verify:.0f}s (2 min pour données API)")
                 await asyncio.sleep(wait_to_verify)
             
             print(f"[SESSION] 🔍 Vérification signal #{signal_id} (M1)...")
             
             try:
-                await auto_verifier.verify_single_signal(signal_id)
+                result = await auto_verifier.verify_single_signal(signal_id)
+                if result:
+                    print(f"[SESSION] ✅ Résultat: {result}")
+                else:
+                    print(f"[SESSION] ⚠️ Vérification en attente")
             except Exception as e:
                 print(f"[SESSION] ❌ Erreur vérif: {e}")
             
@@ -750,17 +776,17 @@ async def main():
     now_utc = get_utc_now()
 
     print("\n" + "="*60)
-    print("🤖 BOT DE TRADING ULTRA STRICT - HAÏTI")
+    print("🤖 BOT DE TRADING ÉQUILIBRÉ - HAÏTI")
     print("="*60)
     print(f"🇭🇹 Haïti: {now_haiti.strftime('%H:%M:%S %Z')}")
     print(f"🌍 UTC: {now_utc.strftime('%H:%M:%S %Z')}")
     print(f"📈 Forex: {'🟢 OUVERT' if is_forex_open() else '🔴 FERMÉ'}")
     print(f"⏰ Début: {START_HOUR_HAITI}h00 AM (Haïti)")
-    print(f"🎯 Objectif: {NUM_SIGNALS_PER_DAY} signaux/jour - 90% WR")
+    print(f"🎯 Objectif: {NUM_SIGNALS_PER_DAY} signaux/jour - 70-80% WR")
     print(f"⚡ Intervalle: 30 minutes entre signaux")
     print(f"📍 Timeframe: M1 (1 minute)")
     print(f"⏰ Signal envoyé: 3 min AVANT l'entrée")
-    print(f"⚙️ Vérification: 1 min après entrée (total 4 min)")
+    print(f"⚙️ Vérification: 2 min après entrée (total 5 min)")
     print(f"🚫 Mode: SANS GALE (haute précision)")
     print("="*60 + "\n")
 
@@ -769,6 +795,7 @@ async def main():
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler('start', cmd_start))
+    app.add_handler(CommandHandler('menu', cmd_menu))
     app.add_handler(CommandHandler('stats', cmd_stats))
     app.add_handler(CommandHandler('status', cmd_status))
     app.add_handler(CommandHandler('rapport', cmd_rapport))

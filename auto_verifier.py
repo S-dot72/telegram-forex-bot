@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 import requests
+from utils import round_to_m5_candle, get_m5_candle_range
 
 class AutoResultVerifier:
     def __init__(self, engine, twelvedata_api_key, bot=None):
@@ -11,9 +12,9 @@ class AutoResultVerifier:
         self.bot = bot
         self.admin_chat_ids = []
         
-        # Paramètres pour M1 SANS GALE
-        self.default_timeframe = 1  # 1 minute (M1)
-        self.default_max_gales = 0  # SANS GALE
+        # Paramètres pour M5
+        self.default_timeframe = 5  # 5 minutes (M5)
+        self.default_max_gales = 0
         self._session = requests.Session()
 
     def set_bot(self, bot):
@@ -63,14 +64,14 @@ class AutoResultVerifier:
 
     async def verify_single_signal(self, signal_id):
         """
-        Vérifie UN SEUL signal en M1 SANS GALE
-        Vérification immédiate 2 minutes après l'entrée
+        Vérifie UN SEUL signal en M5
+        Vérification avec arrondi sur bougie M5
         """
         try:
             with self.engine.connect() as conn:
                 signal = conn.execute(
                     text("""
-                        SELECT id, pair, direction, ts_enter, confidence
+                        SELECT id, pair, direction, ts_enter, confidence, kill_zone
                         FROM signals
                         WHERE id = :sid AND result IS NULL
                     """),
@@ -81,9 +82,10 @@ class AutoResultVerifier:
                 print(f"⚠️ Signal #{signal_id} déjà vérifié ou inexistant")
                 return None
             
-            signal_id, pair, direction, ts_enter, confidence = signal
+            signal_id, pair, direction, ts_enter, confidence, kill_zone = signal
             
-            print(f"\n🔍 Vérification M1 signal #{signal_id} - {pair} {direction}")
+            kz_text = f" [{kill_zone}]" if kill_zone else ""
+            print(f"\n🔍 Vérification M5 signal #{signal_id} - {pair} {direction}{kz_text}")
             
             # Vérifier si week-end
             if self._is_weekend(ts_enter):
@@ -97,20 +99,20 @@ class AutoResultVerifier:
                 })
                 return 'LOSE'
             
-            # Vérifier si le signal M1 est complet
-            if not self._is_signal_complete_m1(ts_enter):
-                print(f"⏳ Signal M1 pas encore prêt")
+            # Vérifier si le signal M5 est complet
+            if not self._is_signal_complete_m5(ts_enter):
+                print(f"⏳ Signal M5 pas encore prêt")
                 return None
             
-            # Vérifier le signal M1 (SANS GALE)
-            result, details = await self._verify_signal_m1(
+            # Vérifier le signal M5
+            result, details = await self._verify_signal_m5(
                 signal_id, pair, direction, ts_enter
             )
             
             if result:
                 self._update_signal_result(signal_id, result, details)
                 emoji = "✅" if result == 'WIN' else "❌"
-                print(f"{emoji} Résultat M1: {result}")
+                print(f"{emoji} Résultat M5: {result}")
                 
                 if details and details.get('pips'):
                     print(f"   📊 {details['pips']:.1f} pips")
@@ -127,15 +129,15 @@ class AutoResultVerifier:
             return None
 
     async def verify_pending_signals(self):
-        """Vérifie tous les signaux M1 qui n'ont pas encore de résultat"""
+        """Vérifie tous les signaux M5 qui n'ont pas encore de résultat"""
         try:
             now_utc = datetime.now(timezone.utc)
             print("\n" + "="*60)
-            print(f"🔍 VÉRIFICATION AUTO M1 - {now_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
+            print(f"🔍 VÉRIFICATION AUTO M5 - {now_utc.strftime('%Y-%m-%d %H:%M:%S')} UTC")
             print("="*60)
 
             query = text("""
-                SELECT id, pair, direction, ts_enter, confidence
+                SELECT id, pair, direction, ts_enter, confidence, kill_zone
                 FROM signals
                 WHERE result IS NULL
                 ORDER BY ts_enter DESC
@@ -145,7 +147,7 @@ class AutoResultVerifier:
             with self.engine.connect() as conn:
                 pending = conn.execute(query).fetchall()
             
-            print(f"📊 Signaux M1 sans résultat: {len(pending)}")
+            print(f"📊 Signaux M5 sans résultat: {len(pending)}")
             
             if not pending:
                 print("✅ Aucun signal en attente")
@@ -170,9 +172,11 @@ class AutoResultVerifier:
                     direction = signal_row[2]
                     ts_enter = signal_row[3]
                     confidence = signal_row[4] if signal_row[4] else 0.5
+                    kill_zone = signal_row[5] if len(signal_row) > 5 else None
                     
+                    kz_text = f" [{kill_zone}]" if kill_zone else ""
                     print(f"\n{'='*40}")
-                    print(f"🔎 Signal M1 #{signal_id} - {pair} {direction}")
+                    print(f"🔎 Signal M5 #{signal_id} - {pair} {direction}{kz_text}")
                     print(f"{'='*40}")
                     
                     # Vérifier si week-end
@@ -192,20 +196,21 @@ class AutoResultVerifier:
                             'direction': direction,
                             'result': 'LOSE',
                             'details': {'reason': 'Week-end'},
-                            'confidence': confidence
+                            'confidence': confidence,
+                            'kill_zone': kill_zone
                         })
                         continue
                     
-                    # Vérifier si signal M1 complet
-                    if not self._is_signal_complete_m1(ts_enter):
+                    # Vérifier si signal M5 complet
+                    if not self._is_signal_complete_m5(ts_enter):
                         skipped_count += 1
-                        print(f"➡️  SKIP - Signal M1 pas prêt\n")
+                        print(f"➡️  SKIP - Signal M5 pas prêt\n")
                         continue
                     
-                    print(f"✅ Signal M1 prêt pour vérification")
+                    print(f"✅ Signal M5 prêt pour vérification")
                     
-                    # Vérifier le signal M1
-                    result, details = await self._verify_signal_m1(
+                    # Vérifier le signal M5
+                    result, details = await self._verify_signal_m5(
                         signal_id, pair, direction, ts_enter
                     )
                     
@@ -218,7 +223,8 @@ class AutoResultVerifier:
                             'direction': direction,
                             'result': result,
                             'details': details or {},
-                            'confidence': confidence
+                            'confidence': confidence,
+                            'kill_zone': kill_zone
                         })
                         
                         emoji = "✅" if result == 'WIN' else "❌"
@@ -251,17 +257,17 @@ class AutoResultVerifier:
             traceback.print_exc()
             
             if self.bot and self.admin_chat_ids:
-                error_msg = f"❌ **Erreur vérification M1**\n\n{str(e)[:200]}"
+                error_msg = f"❌ **Erreur vérification M5**\n\n{str(e)[:200]}"
                 for chat_id in self.admin_chat_ids:
                     try:
                         await self.bot.send_message(chat_id=chat_id, text=error_msg)
                     except:
                         pass
 
-    def _is_signal_complete_m1(self, ts_enter):
+    def _is_signal_complete_m5(self, ts_enter):
         """
-        Vérifie si signal M1 est complet
-        Pour M1: 2 minutes d'attente après l'entrée pour avoir les données API
+        Vérifie si signal M5 est complet
+        Pour M5: 5 minutes d'attente après l'entrée pour avoir la bougie complète
         """
         try:
             # Parser timestamp
@@ -284,37 +290,39 @@ class AutoResultVerifier:
             else:
                 entry_time_utc = entry_time_utc.astimezone(timezone.utc)
 
-            # Pour M1: vérification 2 minutes après l'entrée
-            # Donne le temps pour que l'API ait les données de la bougie
-            end_time_utc = entry_time_utc + timedelta(minutes=2)
+            # IMPORTANT: Arrondir à la bougie M5
+            entry_time_utc = round_to_m5_candle(entry_time_utc)
+
+            # Pour M5: vérification 5 minutes après l'entrée
+            # Cela donne une bougie M5 complète
+            end_time_utc = entry_time_utc + timedelta(minutes=5)
             
             now_utc = datetime.now(timezone.utc)
             
             is_complete = now_utc >= end_time_utc
             
-            print(f"   📅 Entrée UTC: {entry_time_utc.strftime('%Y-%m-%d %H:%M:%S')}")
-            print(f"   📅 Fin M1 UTC: {end_time_utc.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"   📅 Entrée M5 UTC: {entry_time_utc.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"   📅 Fin M5 UTC: {end_time_utc.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"   📅 Maintenant UTC: {now_utc.strftime('%Y-%m-%d %H:%M:%S')}")
             
             if is_complete:
-                print(f"   ✅ COMPLET M1")
+                print(f"   ✅ COMPLET M5")
             else:
                 remaining_seconds = (end_time_utc - now_utc).total_seconds()
-                print(f"   ⏳ PAS COMPLET M1 - Attente: {remaining_seconds:.0f}s")
+                print(f"   ⏳ PAS COMPLET M5 - Attente: {remaining_seconds:.0f}s")
             
             return is_complete
             
         except Exception as e:
-            print(f"❌ Erreur _is_signal_complete_m1: {e}")
+            print(f"❌ Erreur _is_signal_complete_m5: {e}")
             import traceback
             traceback.print_exc()
             return False
 
-    async def _verify_signal_m1(self, signal_id, pair, direction, ts_enter):
+    async def _verify_signal_m5(self, signal_id, pair, direction, ts_enter):
         """
-        ⚠️ CORRECTION CRITIQUE: Vérifier la BOUGIE D'ENTRÉE M1
-        Pour M1, on vérifie la bougie où le trade est entré (pas la suivante)
-        Exemple: Signal à 20:44:37 → vérifier bougie 20:44-20:45 (pas 20:45-20:46)
+        Vérifie la bougie M5 d'entrée avec arrondi correct
+        Pour M5: entrée à HH:MM:00 → sortie à HH:MM+5:00
         """
         try:
             # Parser timestamp
@@ -341,27 +349,25 @@ class AutoResultVerifier:
                     'reason': 'Marché fermé (week-end)'
                 }
 
-            # ⚠️ CORRECTION CRITIQUE: Arrondir au début de la minute
-            # Pour M1, on vérifie la bougie D'ENTRÉE (pas la suivante)
-            # Exemple: Signal à 20:44:37 → vérifier bougie 20:44-20:45
-            entry_minute = entry_time_utc.replace(second=0, microsecond=0)
-            exit_minute = entry_minute + timedelta(minutes=1)
+            # CRITIQUE: Arrondir à la bougie M5
+            # Exemple: 14:23:47 → 14:20:00
+            entry_candle_start, entry_candle_end = get_m5_candle_range(entry_time_utc)
             
-            print(f"   📍 M1 Trading: Bougie {entry_minute.strftime('%H:%M')}-{exit_minute.strftime('%H:%M')} UTC")
+            print(f"   📍 M5 Trading: Bougie {entry_candle_start.strftime('%H:%M')}-{entry_candle_end.strftime('%H:%M')} UTC")
             print(f"   📈 Direction: {direction}")
             
-            # Récupérer prix d'entrée (ouverture de la bougie)
-            entry_price = await self._get_price_at_time(pair, entry_minute)
+            # Récupérer prix d'entrée (ouverture de la bougie M5)
+            entry_price = await self._get_price_at_time(pair, entry_candle_start, price_type='open')
             if entry_price is None:
-                print(f"   ⚠️  Prix d'entrée M1 non disponible")
+                print(f"   ⚠️  Prix d'entrée M5 non disponible")
                 return None, None
             
             await asyncio.sleep(0.5)
             
-            # Récupérer prix de sortie (fermeture de la bougie)
-            exit_price = await self._get_price_at_time(pair, exit_minute)
+            # Récupérer prix de sortie (fermeture de la bougie M5)
+            exit_price = await self._get_price_at_time(pair, entry_candle_start, price_type='close')
             if exit_price is None:
-                print(f"   ⚠️  Prix de sortie M1 non disponible")
+                print(f"   ⚠️  Prix de sortie M5 non disponible")
                 return None, None
             
             # Calculer résultat
@@ -372,7 +378,7 @@ class AutoResultVerifier:
             print(f"   💰 Prix sortie:  {exit_price:.5f}")
             print(f"   📊 Différence:   {price_diff:+.5f} ({pips_diff:.1f} pips)")
             
-            # Vérification par direction (sans marge minimale)
+            # Vérification par direction
             if direction == 'CALL':
                 is_winning = exit_price > entry_price
                 print(f"   🎯 CALL: Besoin que sortie > entrée")
@@ -388,53 +394,59 @@ class AutoResultVerifier:
                 'entry_price': entry_price,
                 'exit_price': exit_price,
                 'pips': pips_diff,
-                'gale_level': 0  # SANS GALE
+                'gale_level': 0
             }
             
             if is_winning:
-                print(f"   ✅ WIN M1 (+{pips_diff:.1f} pips)")
+                print(f"   ✅ WIN M5 (+{pips_diff:.1f} pips)")
             else:
-                print(f"   ❌ LOSE M1 (-{pips_diff:.1f} pips)")
+                print(f"   ❌ LOSE M5 (-{pips_diff:.1f} pips)")
             
             return result, details
             
         except Exception as e:
-            print(f"❌ Erreur _verify_signal_m1: {e}")
+            print(f"❌ Erreur _verify_signal_m5: {e}")
             import traceback
             traceback.print_exc()
             return None, None
 
-    async def _get_price_at_time(self, pair, timestamp):
-        """Récupère prix à un moment donné (timestamp en UTC) pour M1"""
+    async def _get_price_at_time(self, pair, timestamp, price_type='close'):
+        """
+        Récupère prix à un moment donné (timestamp en UTC) pour M5
+        price_type: 'open' ou 'close'
+        """
         try:
             if timestamp.tzinfo is None:
                 timestamp = timestamp.replace(tzinfo=timezone.utc)
 
             ts_utc = timestamp.astimezone(timezone.utc)
             
+            # Arrondir à la bougie M5
+            ts_utc = round_to_m5_candle(ts_utc)
+            
             # Vérifier si week-end
             if self._is_weekend(ts_utc):
                 print(f"   🏖️ Week-end détecté - Pas d'appel API")
                 return None
             
-            # Plage réduite pour M1: ±2 minutes
-            start_dt = ts_utc - timedelta(minutes=2)
-            end_dt = ts_utc + timedelta(minutes=2)
+            # Plage pour M5: ±10 minutes pour être sûr
+            start_dt = ts_utc - timedelta(minutes=10)
+            end_dt = ts_utc + timedelta(minutes=10)
             
             start_str = start_dt.strftime('%Y-%m-%d %H:%M:%S')
             end_str = end_dt.strftime('%Y-%m-%d %H:%M:%S')
             
             params = {
                 'symbol': pair,
-                'interval': '1min',
-                'outputsize': 5,  # Très réduit pour M1
+                'interval': '5min',
+                'outputsize': 5,
                 'apikey': self.api_key,
                 'format': 'JSON',
                 'start_date': start_str,
                 'end_date': end_str
             }
             
-            print(f"   🔍 API M1: {pair} autour de {ts_utc.strftime('%H:%M:%S')} UTC")
+            print(f"   🔍 API M5: {pair} {price_type} à {ts_utc.strftime('%H:%M')} UTC")
             
             resp = self._session.get(self.base_url, params=params, timeout=12)
             resp.raise_for_status()
@@ -461,31 +473,41 @@ class AutoResultVerifier:
                     if candle_time.tzinfo is None:
                         candle_time = candle_time.replace(tzinfo=timezone.utc)
                     
+                    # Arrondir la bougie de l'API aussi
+                    candle_time = round_to_m5_candle(candle_time)
+                    
                     diff = abs((candle_time - ts_utc).total_seconds())
                     if diff < min_diff:
                         min_diff = diff
                         closest_candle = candle
                 
-                # Pour M1: tolérance de 2 minutes max
-                if closest_candle and min_diff <= 120:
+                # Pour M5: tolérance de 5 minutes max (une bougie)
+                if closest_candle and min_diff <= 300:
                     try:
-                        price = float(closest_candle['close'])
-                        print(f"   💰 Prix trouvé: {price} (diff: {min_diff:.0f}s)")
+                        # Choisir open ou close selon le type demandé
+                        price = float(closest_candle[price_type])
+                        print(f"   💰 Prix {price_type} trouvé: {price} (diff: {min_diff:.0f}s)")
                         return price
                     except:
-                        return None
+                        # Fallback sur close si open n'existe pas
+                        try:
+                            price = float(closest_candle['close'])
+                            print(f"   💰 Prix close (fallback): {price}")
+                            return price
+                        except:
+                            return None
             
-            print(f"   ⚠️  Aucune bougie M1 trouvée pour {pair}")
+            print(f"   ⚠️  Aucune bougie M5 trouvée pour {pair}")
             return None
             
         except Exception as e:
-            print(f"⚠️  Erreur API M1 pour {pair}: {e}")
+            print(f"⚠️  Erreur API M5 pour {pair}: {e}")
             return None
 
     def _update_signal_result(self, signal_id, result, details):
         """Met à jour résultat dans DB"""
         try:
-            gale_level = 0  # Toujours 0 en mode SANS GALE
+            gale_level = 0
             reason = details.get('reason', '') if details else ''
             
             query = text("""
@@ -502,7 +524,7 @@ class AutoResultVerifier:
                     'id': signal_id
                 })
             
-            print(f"💾 Résultat M1 sauvegardé: #{signal_id} = {result}")
+            print(f"💾 Résultat M5 sauvegardé: #{signal_id} = {result}")
             
         except Exception as e:
             print(f"❌ Erreur _update_signal_result: {e}")
@@ -518,7 +540,7 @@ class AutoResultVerifier:
         """Rapport quand rien à vérifier"""
         today_stats = self._get_today_stats()
 
-        msg = "📊 **RAPPORT VÉRIFICATION M1**\n"
+        msg = "📊 **RAPPORT VÉRIFICATION M5**\n"
         msg += "━━━━━━━━━━━━━━━━━━━━\n\n"
         msg += "✅ Aucun signal à vérifier\n\n"
         
@@ -530,7 +552,7 @@ class AutoResultVerifier:
             msg += f"• ⏳ En attente: {today_stats['pending']}\n"
             if today_stats['wins'] + today_stats['losses'] > 0:
                 msg += f"• 📈 Win rate: {today_stats['winrate']:.1f}%\n"
-            msg += f"\n🎯 Mode: M1 SANS GALE\n"
+            msg += f"\n📍 Timeframe: M5\n"
         
         msg += "\n━━━━━━━━━━━━━━━━━━━━"
         
@@ -541,15 +563,15 @@ class AutoResultVerifier:
                 print(f"❌ Envoi à {chat_id}: {e}")
 
     async def _send_verification_report(self, results, skipped_count=0, error_count=0):
-        """Envoie rapport de vérification M1"""
+        """Envoie rapport de vérification M5"""
         try:
-            print("📝 Génération rapport M1...")
+            print("📝 Génération rapport M5...")
 
             today_stats = self._get_today_stats()
             wins = sum(1 for r in results if r.get('result') == 'WIN')
             losses = len(results) - wins
             
-            report = "📊 **RAPPORT VÉRIFICATION M1**\n"
+            report = "📊 **RAPPORT VÉRIFICATION M5**\n"
             report += "━━━━━━━━━━━━━━━━━━━━\n\n"
             
             if today_stats and today_stats['total_signals'] > 0:
@@ -571,7 +593,7 @@ class AutoResultVerifier:
                     report += f"• ⏳ Non terminés: {skipped_count}\n"
                 if error_count > 0:
                     report += f"• ⚠️ Erreurs: {error_count}\n"
-                report += "\n📋 **Détails M1:**\n\n"
+                report += "\n📋 **Détails M5:**\n\n"
                 
                 for i, r in enumerate(results[:10], 1):
                     emoji = "✅" if r['result'] == 'WIN' else "❌"
@@ -582,13 +604,15 @@ class AutoResultVerifier:
                     elif r['details'].get('pips'):
                         detail_text = f" • {r['details']['pips']:.1f} pips"
                     
-                    report += f"{i}. {emoji} **{r['pair']}** {r['direction']}{detail_text}\n"
+                    kz_text = f" [{r.get('kill_zone')}]" if r.get('kill_zone') else ""
+                    
+                    report += f"{i}. {emoji} **{r['pair']}** {r['direction']}{kz_text}{detail_text}\n"
             else:
                 report += "ℹ️ Aucun signal vérifié\n"
                 if skipped_count > 0:
-                    report += f"\n⏳ {skipped_count} signal(s) M1 en attente\n"
+                    report += f"\n⏳ {skipped_count} signal(s) M5 en attente\n"
             
-            report += f"\n🎯 Mode: M1 SANS GALE\n"
+            report += f"\n📍 Timeframe: M5\n"
             report += "\n━━━━━━━━━━━━━━━━━━━━"
             
             print(f"📤 Envoi à {len(self.admin_chat_ids)} admin(s)")
@@ -602,10 +626,10 @@ class AutoResultVerifier:
                 except Exception as e:
                     print(f"   ❌ Échec {chat_id}: {e}")
             
-            print(f"✅ Rapport M1 envoyé à {sent_count}/{len(self.admin_chat_ids)}")
+            print(f"✅ Rapport M5 envoyé à {sent_count}/{len(self.admin_chat_ids)}")
             
         except Exception as e:
-            print(f"❌ Erreur rapport M1: {e}")
+            print(f"❌ Erreur rapport M5: {e}")
             import traceback
             traceback.print_exc()
 

@@ -16,6 +16,7 @@ from utils import compute_indicators, rule_signal_ultra_strict
 from ml_predictor import MLSignalPredictor
 from auto_verifier import AutoResultVerifier
 from ml_continuous_learning import ContinuousLearning, scheduled_retraining
+from backtest import BacktesterM5
 
 # Configuration
 HAITI_TZ = ZoneInfo("America/Port-au-Prince")
@@ -243,6 +244,9 @@ async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 **Machine Learning:**\n"
         "• /mlstats - Statistiques ML\n"
         "• /retrain - Réentraîner le modèle ML\n\n"
+        "🔬 **Backtesting:**\n"
+        "• /backtest - Lancer un backtest M5\n"
+        "• /backtest <paire> - Backtest sur une paire\n\n"
         "🔧 **Contrôles:**\n"
         "• /testsignal - Forcer un signal de test\n"
         "• /menu - Afficher ce menu\n\n"
@@ -463,6 +467,54 @@ async def cmd_test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_backtest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Lance un backtest M5 et envoie les résultats"""
+    try:
+        msg = await update.message.reply_text(
+            "🔬 **Lancement du backtest M5**\n\n"
+            "⏳ Analyse en cours...\n"
+            "Cela peut prendre 1-2 minutes."
+        )
+        
+        # Vérifier si une paire spécifique est demandée
+        pairs_to_test = PAIRS[:3]  # Par défaut: top 3
+        
+        if context.args and len(context.args) > 0:
+            # Paire spécifique demandée
+            requested_pair = context.args[0].upper().replace('-', '/')
+            if requested_pair in PAIRS:
+                pairs_to_test = [requested_pair]
+            else:
+                await msg.edit_text(
+                    f"❌ Paire non reconnue: {requested_pair}\n\n"
+                    f"Paires disponibles:\n" + "\n".join(f"• {p}" for p in PAIRS[:5])
+                )
+                return
+        
+        # Lancer le backtest
+        backtester = BacktesterM5(confidence_threshold=CONFIDENCE_THRESHOLD)
+        
+        print(f"\n[BACKTEST] Lancement pour {len(pairs_to_test)} paire(s)")
+        
+        results = backtester.run_full_backtest(
+            pairs=pairs_to_test,
+            outputsize=3000  # 3000 bougies M5 = ~10 jours de données
+        )
+        
+        # Formater et envoyer les résultats
+        result_msg = backtester.format_results_for_telegram(results)
+        
+        await msg.edit_text(result_msg)
+        
+        print(f"[BACKTEST] ✅ Résultats envoyés")
+        
+    except Exception as e:
+        error_msg = f"❌ **Erreur backtest**\n\n{str(e)[:200]}"
+        await update.message.reply_text(error_msg)
+        print(f"[BACKTEST] ❌ Erreur: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def send_pre_signal(pair, entry_time_haiti, app, kill_zone_name):
     if not is_forex_open():
@@ -866,6 +918,7 @@ async def main():
     app.add_handler(CommandHandler('killzones', cmd_killzones))
     app.add_handler(CommandHandler('mlstats', cmd_mlstats))
     app.add_handler(CommandHandler('retrain', cmd_retrain))
+    app.add_handler(CommandHandler('backtest', cmd_backtest))
     app.add_handler(CommandHandler('testsignal', cmd_test_signal))
 
     sched.start()

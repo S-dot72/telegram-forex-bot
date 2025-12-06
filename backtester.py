@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 from datetime import timedelta
 from utils import compute_indicators, rule_signal
-from config import TWELVEDATA_API_KEY, PAIRS, TIMEFRAME_M1
+from config import TWELVEDATA_API_KEY, PAIRS, TIMEFRAME_M5
 
 TD = 'https://api.twelvedata.com/time_series'
 

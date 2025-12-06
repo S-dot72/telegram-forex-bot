@@ -775,9 +775,8 @@ async def main():
         await app.shutdown()
         sched.shutdown()
 
-    if __name__ == '__main__':
-        if __name__ == '__main__':
-            asyncio.run(main())
+if __name__ == '__main__':
+    asyncio.run(main())haiti = start_haiti + timedelta(days=1)
         
         start_utc = start_haiti.astimezone(timezone.utc)
         end_utc = end_haiti.astimezone(timezone.utc)
@@ -823,6 +822,164 @@ async def main():
         
     except Exception as e:
         await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def cmd_test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Force le démarrage d'une session de test"""
+    try:
+        global signal_queue_running
+        
+        if signal_queue_running:
+            await update.message.reply_text("⚠️ Une session est déjà en cours")
+            return
+        
+        msg = await update.message.reply_text("🚀 Démarrage session de test...")
+        
+        app = context.application
+        asyncio.create_task(process_signal_queue(app))
+        
+        await msg.edit_text("✅ Session de test lancée !")
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erreur: {e}")
+
+async def send_pre_signal(pair, entry_time_haiti, app, kill_zone_name):
+    """
+    Envoie un signal 5 minutes AVANT l'entrée
+    Seuil ML: 65%
+    """
+    if not is_forex_open():
+        print("[SIGNAL] 🏖️ Marché fermé")
+        return None
+    
+    now_haiti = get_haiti_now()
+    print(f"\n[SIGNAL] 📤 Tentative {pair} - {now_haiti.strftime('%H:%M:%S')}")
+
+    try:
+        params = BEST_PARAMS.get(pair, {})
+        df = get_cached_ohlc(pair, TIMEFRAME_M5, outputsize=400)
+
+        if df is None or len(df) < 50:
+            print("[SIGNAL] ❌ Pas de données")
+            return None
+        
+        df = compute_indicators(df, ema_fast=params.get('ema_fast',8),
+                                ema_slow=params.get('ema_slow',21),
+                                rsi_len=params.get('rsi',14),
+                                bb_len=params.get('bb',20))
+        
+        base_signal = rule_signal_ultra_strict(df)
+        
+        if not base_signal:
+            print("[SIGNAL] ⏭️ Pas de signal (stratégie)")
+            return None
+        
+        # ML avec seuil 65%
+        ml_signal, ml_conf = ml_predictor.predict_signal(df, base_signal)
+        if ml_signal is None or ml_conf < CONFIDENCE_THRESHOLD:
+            print(f"[SIGNAL] ❌ Rejeté par ML ({ml_conf:.1%})")
+            return None
+        
+        entry_time_haiti = now_haiti + timedelta(minutes=DELAY_BEFORE_ENTRY_MIN)
+        entry_time_utc = entry_time_haiti.astimezone(timezone.utc)
+        
+        print(f"[SIGNAL] 📤 Signal trouvé ! Entrée: {entry_time_haiti.strftime('%H:%M')} (dans {DELAY_BEFORE_ENTRY_MIN} min)")
+        
+        payload = {
+            'pair': pair, 'direction': ml_signal, 'reason': f'ML {ml_conf:.1%} - {kill_zone_name}',
+            'ts_enter': entry_time_utc.isoformat(), 'ts_send': get_utc_now().isoformat(),
+            'confidence': ml_conf, 'payload': json.dumps({'pair': pair, 'kill_zone': kill_zone_name}),
+            'max_gales': 0
+        }
+        signal_id = persist_signal(payload)
+        
+        # Mettre à jour la kill zone
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("UPDATE signals SET kill_zone = :kz WHERE id = :sid"),
+                    {'kz': kill_zone_name, 'sid': signal_id}
+                )
+        except:
+            pass
+        
+        with engine.connect() as conn:
+            user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
+        
+        direction_text = "BUY" if ml_signal == "CALL" else "SELL"
+        
+        msg = (
+            f"🎯 SIGNAL — {pair}\n\n"
+            f"🎯 Kill Zone: {kill_zone_name}\n"
+            f"🕐 Entrée: {entry_time_haiti.strftime('%H:%M')} (Haïti)\n"
+            f"📍 Timeframe: M5 (5 minutes)\n\n"
+            f"📈 Direction: **{direction_text}**\n"
+            f"💪 Confiance: **{int(ml_conf*100)}%**\n\n"
+            f"🔍 Vérification: 5 min après entrée"
+        )
+        
+        for uid in user_ids:
+            try:
+                await app.bot.send_message(chat_id=uid, text=msg)
+            except Exception as e:
+                print(f"[SIGNAL] ❌ Envoi à {uid}: {e}")
+        
+        print(f"[SIGNAL] ✅ Envoyé ({ml_signal}, {ml_conf:.1%})")
+        return signal_id
+
+    except Exception as e:
+        print(f"[SIGNAL] ❌ Erreur: {e}")
+        return None
+
+async def send_verification_briefing(signal_id, app):
+    try:
+        with engine.connect() as conn:
+            signal = conn.execute(
+                text("SELECT pair, direction, result, confidence, kill_zone FROM signals WHERE id = :sid"),
+                {"sid": signal_id}
+            ).fetchone()
+
+        if not signal or not signal[2]:
+            print(f"[BRIEFING] ⚠️ Signal #{signal_id} non vérifié")
+            return
+
+        pair, direction, result, confidence, kill_zone = signal
+        
+        with engine.connect() as conn:
+            user_ids = [r[0] for r in conn.execute(text("SELECT user_id FROM subscribers")).fetchall()]
+        
+        if result == "WIN":
+            emoji = "✅"
+            status = "GAGNÉ"
+        else:
+            emoji = "❌"
+            status = "PERDU"
+        
+        direction_emoji = "📈" if direction == "CALL" else "📉"
+        
+        briefing = (
+            f"{emoji} **BRIEFING SIGNAL**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{direction_emoji} Paire: **{pair}**\n"
+            f"📊 Direction: **{direction}**\n"
+            f"💪 Confiance: {int(confidence*100)}%\n"
+        )
+        
+        if kill_zone:
+            briefing += f"🎯 Kill Zone: {kill_zone}\n"
+        
+        briefing += f"\n🎲 Résultat: **{status}**\n\n"
+        briefing += f"━━━━━━━━━━━━━━━━━━━━"
+        
+        for uid in user_ids:
+            try:
+                await app.bot.send_message(chat_id=uid, text=briefing)
+            except:
+                pass
+        
+        print(f"[BRIEFING] ✅ Envoyé: {status}")
+
+    except Exception as e:
+        print(f"[BRIEFING] ❌ Erreur: {e}")
 
 async def cmd_test_signal(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Force le démarrage d'une session de test"""

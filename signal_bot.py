@@ -775,8 +775,9 @@ async def main():
         await app.shutdown()
         sched.shutdown()
 
-if __name__ == '__main__':
-    asyncio.run(main())haiti = start_haiti + timedelta(days=1)
+    if __name__ == '__main__':
+        if __name__ == '__main__':
+            asyncio.run(main())
         
         start_utc = start_haiti.astimezone(timezone.utc)
         end_utc = end_haiti.astimezone(timezone.utc)

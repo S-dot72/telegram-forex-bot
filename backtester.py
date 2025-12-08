@@ -107,7 +107,7 @@ class BacktesterM5:
             
             # MODE NORMAL (marché ouvert)
             print(f"   📡 Marché OUVERT - Données réelles API")
-            symbol = pair.replace('/', '')
+            symbol = pair
             
             end_date = now_utc
             start_date = end_date - timedelta(days=7)

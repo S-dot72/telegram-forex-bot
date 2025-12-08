@@ -79,14 +79,34 @@ class BacktesterM5:
         try:
             from datetime import datetime, timedelta, timezone
             now_utc = datetime.now(timezone.utc)
-            is_weekend = now_utc.weekday() in [5, 6] or (now_utc.weekday() == 4 and now_utc.hour >= 22)
+            
+            # CORRECTION: Vérifier si le marché Forex est VRAIMENT fermé
+            # Forex ouvert: Dimanche 22h UTC → Vendredi 22h UTC
+            weekday = now_utc.weekday()
+            hour = now_utc.hour
+            
+            # Samedi = toujours fermé
+            is_weekend = (weekday == 5)
+            
+            # Dimanche = fermé AVANT 22h UTC
+            if weekday == 6 and hour < 22:
+                is_weekend = True
+            
+            # Vendredi = fermé APRÈS 22h UTC
+            if weekday == 4 and hour >= 22:
+                is_weekend = True
+            
+            # Si lundi-jeudi ou dimanche après 22h = marché OUVERT
+            if weekday in [0, 1, 2, 3] or (weekday == 6 and hour >= 22):
+                is_weekend = False
             
             # MODE DÉMO WEEK-END
             if is_weekend:
                 print(f"   🏖️ Week-end détecté - Mode DÉMO activé")
                 return self.generate_demo_data(pair, num_candles=2000)
             
-            # MODE NORMAL (semaine)
+            # MODE NORMAL (marché ouvert)
+            print(f"   📡 Marché OUVERT - Données réelles API")
             symbol = pair.replace('/', '')
             
             end_date = now_utc
@@ -147,7 +167,7 @@ class BacktesterM5:
             
             df.index = pd.to_datetime(df['datetime'])
             
-            print(f"   ✅ {len(df)} bougies chargées")
+            print(f"   ✅ {len(df)} bougies réelles chargées")
             return df
             
         except Exception as e:

@@ -129,12 +129,15 @@ class BacktesterM5:
             
             # Vérifier les erreurs API
             if 'status' in j and j['status'] == 'error':
-                print(f"   ⚠️ Erreur API: {j.get('message', 'Unknown')}")
+                error_msg = j.get('message', 'Unknown')
+                print(f"   ⚠️ Erreur API: {error_msg}")
+                print(f"   📋 Code: {j.get('code', 'N/A')}")
                 print(f"   🎭 Basculement en mode DÉMO")
                 return self.generate_demo_data(pair, num_candles=2000)
             
             if 'values' not in j or not j['values']:
                 print(f"   ⚠️ Aucune valeur retournée")
+                print(f"   📋 Réponse complète: {str(j)[:200]}")  # Afficher la réponse
                 print(f"   🔄 Tentative sans plage de dates...")
                 
                 params_simple = {

@@ -20,4 +20,4 @@ COPY . /app
 WORKDIR /app
 
 # Commande par défaut (adapter selon ton bot)
-CMD ["python", "bot.py"]
+CMD ["python", "signal_bot.py"]
